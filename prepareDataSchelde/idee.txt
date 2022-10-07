@@ -1,0 +1,27 @@
+
+
+Haal data op
+
+Scheldemonitor
+
+evt RWS Waterinfo-extra en Waterinfo
+
+Opgevraagde data in ../data (csv)
+grote binaire files op andere mainer (?)
+
+parameters bodem:
+- Korrelgrootte
+- Sedimentsamenstelling
+- Chlorophyll sediment
+
+parameters pelagiaal
+- primaire productie
+- opgeloste nutrienten en DOC
+- zwevend stof, Extinctiecoeff, Saliniteit, Temperatuur
+- korrelgrootte zwevend stof
+
+Maak tidy database voor analyse
+Maak data voor publicatie in Waterinfo extra
+
+
+
