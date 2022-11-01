@@ -62,10 +62,10 @@ Maak inschatting van PPP over de gehele periode met een betrouwbaarheid.
 
 | Tijd         | activiteit              | geschatte kosten | wie            |
 |--------------|-------------------------|------------------|----------------|
-| Okt 2021     | in situ data preparatie | 15k              | Willem/Dick    |
-| Okt-Nov 2021 | EO data preparatie      | 15k              | Marieke/Daphne |
-| Nov-Dec 2022 | Eerste analyse in situ  | 15k              | Willem/Dick    |
-| Dec          | Setup model EO PP       | 15k              | Marieke/Daphne |
+| Okt 2021     | in situ data preparatie |                  | Willem/Dick    |
+| Okt-Nov 2021 | EO data preparatie      |                  | Marieke/Daphne |
+| Nov-Dec 2022 | Eerste analyse in situ  |                  | Willem/Dick    |
+| Dec          | Setup model EO PP       |                  | Marieke/Daphne |
 
 : planning en budget
 
