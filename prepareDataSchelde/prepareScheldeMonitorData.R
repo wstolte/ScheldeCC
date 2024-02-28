@@ -42,30 +42,19 @@ ppsmMaand <- ppsm %>%
   write_delim("data/Scheldemonitor/bewerkt/ppp_berekend_per_station_per_maand.csv", 
               delim = ";", append = T, col_names = T)
 
-
-
-
-
-
-#=== korrelgroottes en koolstof in Zwevend stof ====================================
-parIDs <- IDs %>%
-  filter(grepl("in zwevend", Parameternaam, ignore.case = T)) %>%
-  filter(
-    grepl("korrel", Parameternaam, ignore.case = T) |
-    grepl("koolstof", Parameternaam, ignore.case = T)
-  ) %>%
-  select(`(Parameternr)`) %>% arrange(`(Parameternr)`) %>%
-  unlist %>% unname
-
-refresh_fysischchemischzwevendstof(1970, 2022, parameterIDs = parIDs)
-
 #========= oppwater uit Scheldemonitor ================================
 
+
 filepath = "2024-02-21_oppWater.csv"
-lapply(2015:2023, 
-       function(x){
-         refresh_fysischchemischoppwater(x, x, filepath = paste(x, filepath, sep = "_"))
-       })
+
+refreshData = F
+
+if(refreshData){
+  lapply(2015:2022, 
+         function(x){
+           refresh_fysischchemischoppwater(x, x, filepath = paste(x, filepath, sep = "_"))
+         })
+}
 
 ## Only if data need to be refreshed. 
 ## parameter codes are hardcoded in function
@@ -85,7 +74,8 @@ df.oppwater <- lapply(2015:2022,
                             parametername,
                             parameterunit,
                             stationname,
-                            category,
+                            external_name,
+                            externalid,
                             valuesign
                           )
                         }
@@ -94,36 +84,42 @@ df.oppwater <- lapply(2015:2022,
 
 write_csv(x = df.oppwater, file = file.path(savepath, "bewerkt", "2015-2022_2024-02-21_oppWater.csv"))
 
-stationLocations <- df.oppwater %>% 
-  filter(stationname != "Westerschelde") %>%
-  group_by(stationname) %>%
-  summarize(latitude = mean(latitude), longitude = mean(longitude))
+df.oppwater %>% group_by(external_name, parametername) %>% summarize(n = n()) %>% 
+  write_csv(file = file.path(savepath, "bewerkt", "parameternames_oppWater.csv"))
 
-write_csv(x = stationLocations, file = file.path(savepath, "bewerkt", "stationLocations_oppWater.csv"))
+additionalStation = tibble(
+  stationname = "Vlakte van de Raan", longitude = 3.30904, latitude = 51.46421
+)
+
+stationLocations <- df.oppwater %>% 
+  bind_rows(additionalStation) %>%
+  filter(stationname != "Westerschelde") %>%
+  distinct(stationname, longitude, latitude)
+
+(stationLocations$longitude)
+scales::scientific(stationLocations$longitude, digits = 10)
+scales::scientific(stationLocations$latitude, digits = 10)
+
+stationLocations$longitude <- format(stationLocations$longitude, digits = 10)
+stationLocations$latitude <- format(stationLocations$latitude, digits = 10)
+
+write.csv(x = stationLocations, file = file.path(savepath, "bewerkt", "stationLocations_oppWater.csv"), row.names = F)
 
 otherLocations <- df.oppwater %>% 
   filter(stationname == "Westerschelde") %>%
-  distinct(stationname, latitude, longitude)
+  distinct(stationname, latitude, longitude, datetime)
 
 write_csv(x = otherLocations, file = file.path(savepath, "bewerkt", "otherLocations_oppWater.csv"))
 
+stationLocations %>%
+  leaflet::leaflet() %>%
+  leaflet::addTiles() %>%
+  leaflet::addCircleMarkers(label = ~ stationname, radius = 2)
 
-# parameters in zwevendstof uit Scheldemonitor 
-
-filepath = "fysChemZwevendStof.csv"
-
-df.zwevendstof <- read_csv(file.path(datapath, paste(today(), filepath)))
-
-df.zwevendstof %>%
-  filter(grepl("korrel", parametername, ignore.case = T)) %>%
-  group_by(parametername) %>% summarize(n = n())
-
-df.zwevendstof %>%
-  filter(grepl("koolstof", parametername, ignore.case = T)) %>%
-  group_by(parametername) %>% summarize(n = n())
-
-df.zwevendstof %>%
-  # filter(grepl("", parametername, ignore.case = T)) %>%
-  group_by(parametername) %>% summarize(n = n()) %>% View
+otherLocations %>%
+  sample_n(1000) %>%
+  leaflet::leaflet() %>%
+  leaflet::addTiles() %>%
+  leaflet::addCircleMarkers()
 
 

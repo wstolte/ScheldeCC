@@ -1,11 +1,14 @@
-stationname,latitude,longitude
-Hansweert boei OHMG,51.44093528,3.99090663
-Hansweert geul,51.437,4.01439
-Hoedekenskerke boei 4,51.426,3.92081
-Hooge Platen,51.3969,3.63428
-Schaar van Ouden Doel,51.35118367,4.2509326
-Terneuzen boei 20,51.3474,3.8257
-Vlakte van de Raan,51.46421,3.30904
-Vlissingen boei SSVH,51.41289998981541,3.56579000276886
-Walcheren 2 km uit de kust,51.548407201680675,3.4100190112044815
-Walcheren 20 km uit de kust,51.65811080745342,3.2197264775707386
+"stationname","longitude","latitude"
+"Vlissingen boei SSVH","3.56579000","51.41290000"
+"Walcheren 2 km uit de kust","3.40950000","51.54810000"
+"Walcheren 20 km uit de kust","3.21921000","51.65780000"
+"Hansweert geul","4.01439000","51.43700000"
+"Terneuzen boei 20","3.82570000","51.34740000"
+"Schaar van Ouden Doel","4.25093260","51.35118367"
+"Hansweert boei OHMG","3.99090663","51.44093528"
+"Vlissingen boei SSVH","3.56579345","51.41288731"
+"Hooge Platen","3.63428000","51.39690000"
+"Hoedekenskerke boei 4","3.92081000","51.42600000"
+"Walcheren 2 km uit de kust","3.41083300","51.54888900"
+"Walcheren 20 km uit de kust","3.22055600","51.65861000"
+"Vlakte van de Raan","3.30904000","51.46421000"
