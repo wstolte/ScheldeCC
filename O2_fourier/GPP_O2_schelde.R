@@ -63,7 +63,7 @@ GPPfromModel_day_avg <- read_table(
     (time - 719529)*86400, origin = "1970-01-01", tz = "UTC"))
 
 gppData <- O2fromModel %>%
-  select(time, O2 = `layer 3`) %>%
+  select(time, O2 = `layer 2`) %>%
   drop_na() %>%
   as.data.frame()
 
@@ -77,14 +77,24 @@ gppData <- O2fromModel %>%
 gpp <- WindowGPPFourier(x = gppData,
                          phi = 51.176932, 
                          lambda = 4.325788,
-                         Width = 1)
+                         Width = 1
+                        )
+
+gppt <- GPPFourier_t(x = gppData,
+                     Nfilt = 6*24*15, # moving average filter
+                     # nf = 10,
+                     NLowPass = 6, # moving average filter width for low pass filtering demodulated O2 series
+                     phi = 51.176932,
+                     lambda = 4.325788)
 
 myPal = scales::hue_pal()(5)
 
 myColors = c(
   "GPPfromModel" = myPal[1],
   "GPPberekend" = myPal[2],
-  "GPPberekendLoess" = myPal[3]
+  "GPPberekendLoess" = myPal[3],
+  "GPPtberekend" = myPal[2],
+  "GPPtberekendLoess" = myPal[3]
 )
 
 ggplot(gpp, aes(time, GPP)) +
@@ -95,6 +105,26 @@ ggplot(gpp, aes(time, GPP)) +
     data = GPPfromModel_day_avg, 
     aes(time, 1e3*gpp_day, color = "GPPfromModel")
     ) +
+  ggtitle(station) +
+  ylab("GPP in mg Oxygen per liter per day") +
+  coord_cartesian(ylim = c(NA,NA)) +
+  scale_color_manual(values = myColors) +
+  theme_light()
+
+
+gppt %>%
+  group_by(date = as_date(times)) %>%
+  summarize(dayavgGPPt = mean(GPPt), .groups = "drop") %>%
+  mutate(times = as_datetime(date)) %>%
+  ggplot(aes(times, dayavgGPPt)) +
+  geom_point(aes(color = "GPPtberekend")) + 
+  geom_smooth(aes(color = "GPPtberekendLoess"), method = "loess", span = 0.1, alpha = 0.1) +
+  # geom_line() +
+  geom_line(
+    data = GPPfromModel_day_avg, 
+    aes(time, 1e3*gpp_day, color = "GPPfromModel"),
+    linewidth = 2
+  ) +
   ggtitle(station) +
   ylab("GPP in mg Oxygen per liter per day") +
   coord_cartesian(ylim = c(NA,NA)) +

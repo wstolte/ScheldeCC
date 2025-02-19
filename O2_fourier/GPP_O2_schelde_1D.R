@@ -180,13 +180,13 @@ ggplot() +
     linewidth = 2
   ) +
   facet_wrap("station", scales = "free", ncol = 1) +
+  xlab("time") +
   ylab("GPP in gC/m3/d") +
   scale_color_manual(
     values = c("gpp_fourier_t" = plotcolors[1],
                "gpp_model" = plotcolors[2],
                "difference" = plotcolors[4])
   ) +
-  ggtitle("gpp fourier vs modelled gpp in gC/m2/d")
+  ggtitle("gpp fourier vs modelled gpp in gC/m3/d")
 
-#===================== older scripts for difference =======================
-
+ggsave(filename = "O2_fourier/manuscript/gppt_1D.png", height = 7, width = 8)
