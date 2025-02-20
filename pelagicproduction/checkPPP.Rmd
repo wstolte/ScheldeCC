@@ -1,0 +1,185 @@
+---
+title: "Pelagic primary production analysis"
+author: "Willem Stolte"
+date: "2022-10-07"
+output: 
+  bookdown::html_document2:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, error = F, message = F)
+require(tidyverse)
+require(lubridate)
+```
+
+
+```{r}
+require(sf)
+
+schelde <-st_read("c:\\GIS_DATA\\Nederland\\Schelde\\oudeData\\Schelde_Dissolved.shp", quiet = T)
+schelde %>%
+  mutate(Id = factor(Id)) %>%
+ggplot() +
+  geom_sf(aes(fill = Id), color = "white") +
+  geom_sf_text(aes(label = Id), color = "white") +
+  coord_sf(xlim = c(10000,90000), ylim = c(340000, 400000)) +
+  theme_void()
+
+```
+
+
+
+# Import data 
+
+## Opgeloste stoffen
+
+!! data moet geupdatet worden !!
+
+```{r}
+library(tidyverse)
+fysChemOppWater <- read_csv("../data/Scheldemonitor/2022_2024-02-21_OppWater.csv", col_types = cols())
+fysChemOppWater %>% distinct(parametername)
+```
+
+
+## Zwevend stof (Deze lijken compleet)
+
+```{r}
+fysChemZwevendstof <- read_csv("../data/Scheldemonitor/fysChemZwevendStof.csv", col_types = cols())
+fysChemZwevendstof %>% distinct(parametername)
+
+```
+
+
+## Meetvis metingen
+
+```{r, fig.width=10, fig.height=4}
+
+file <- "../data/NIOZ/PPDick/clean/Voor_John_FRRFtidy.csv"
+FRRF <- read_csv(file, skip = 1) %>%
+  select(-...1) %>%
+  mutate(date = as_datetime(date, "%d/%m/%Y %H:%M", tz = "MET")) #?correct time zone?
+
+FRRF %>%
+  filter(flag == "A") %>%
+  select(date, box_RWS,
+         Chl,  alpha, eopt, ps,
+         Fluo, Turb, SensH, Temp, pH, Oxy, Sal) %>%
+  pivot_longer(cols = -c(date, box_RWS)) %>% 
+  mutate(name = factor(name, levels = c('Chl',  'alpha', 'eopt', 'ps',
+         'Fluo', 'Turb', 'SensH', 'Temp', 'pH', 'Oxy', 'Sal'))) %>%
+  ggplot() +
+  # geom_histogram(aes(value, fill = box_RWS), bins = 100) +
+  geom_freqpoly(aes(value, color = month(date)), bins = 100) +
+  facet_grid(year(date) ~name, scales = 'free') +
+  scale_x_log10()
+```
+
+## Chlorophyll (FRRF)
+
+### FRRF
+
+Histogram laat zien dat vooral in 2017 WN 2018 erg hoge Chl gemeten is door FRRF.
+
+```{r, fig.height=4, fig.width=4}
+FRRF %>%
+  select(date, Chl, Fluo) %>%
+  mutate(
+    jaar = as.factor(year(date)),
+    maand = month(date),
+    seizoen = case_when(
+      maand %in% c(12,1,2) ~  "winter",
+      maand %in% c(3,4,5) ~   "lente",
+      maand %in% c(6,7,8) ~   "zomer",
+      maand %in% c(9,10,11) ~ "herfst"
+    )
+  ) %>%
+  mutate(seizoen = factor(seizoen, levels = c("winter", "lente", "zomer", "herfst"))) %>%
+  ggplot(aes((Chl))) +
+  geom_freqpoly(aes(color = seizoen), size = 1, bins = 30) +
+  geom_vline(xintercept = 30) +
+  scale_x_log10() +
+  facet_wrap(~ jaar, ncol = 1) +
+  theme_minimal()
+
+```
+
+### FRRF vs scanfish chlorofyll a
+
+Genormaliseerde waarden voor Chl (FRRF) en Fluo (scanfish) laten zien dat er perioden zijn waarin Chl relatief veel afwijkt van het gemiddelde t.o.v. de afwijking van Fluo. 
+
+```{r, fig.height=4, fig.width=8}
+FRRF %>%
+  select(date, Chl, Fluo, box_RWS) %>%
+  filter(Fluo < 10 & Fluo > 0) %>%
+  filter(Chl < 100 & Chl > 0) %>%
+  pivot_longer(cols = -c(date, box_RWS)) %>%
+  group_by(name) %>% mutate(n_value = value/mean(value, na.rm = T)) %>%
+ggplot(aes(date, n_value)) +
+  geom_point(aes(color = name)) #+
+  # facet_wrap(~ box_RWS)
+
+```
+
+Een directe relatie tussen Fluo en Chla laat eenzelfde beeld zien. Waar in 2016 een consistent beeld is te zien in deze relatie, worden grote inconsitenties gezien in 2017 en 2018. Alleen in de zomer van 2018 is de relatie consistent met de relatie in 2016.
+In 2019 zijn niet genoeg metingen om er iets over te zeggen. 
+
+
+```{r, results='hold', fig.cap=""}
+
+FRRF %>%
+  select(date, Chl, Fluo) %>%
+  filter(Fluo < 10) %>%
+  filter(Chl < 100) %>%
+  mutate(
+    jaar = as.factor(year(date)),
+  ) %>%
+ggplot(aes(Fluo, Chl)) +
+  geom_point(aes(color = jaar)) +
+  geom_smooth(aes(color = jaar), method = "lm") +
+  # geom_abline(slope = 6) +
+  scale_x_continuous(limits = c(0,NA)) +
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_minimal()
+
+
+FRRF %>%
+  select(date, Chl, Fluo) %>%
+  filter(Fluo < 10) %>%
+  filter(Chl < 100) %>%
+  mutate(
+    jaar = as.factor(year(date)),
+    maand = month(date),
+    seizoen = case_when(
+      maand %in% c(12,1,2) ~  "winter",
+      maand %in% c(3,4,5) ~   "lente",
+      maand %in% c(6,7,8) ~   "zomer",
+      maand %in% c(9,10,11) ~ "herfst"
+    )
+  ) %>%
+  mutate(seizoen = factor(seizoen, levels = c("winter", "lente", "zomer", "herfst")),
+         maand = factor(maand)) %>%
+ggplot(aes(Fluo, Chl)) +
+  geom_point(aes(color = maand), size = 5, alpha = 0.3) +
+  geom_smooth(method = "lm") +
+  geom_abline(slope = 6) +
+  geom_text(aes(label = maand)) +
+  facet_wrap(~ jaar, ncol = 2, scales = 'free') +
+  scale_x_continuous(limits = c(0,6)) +
+  scale_y_continuous(limits = c(0,36)) +
+  theme_light()
+```
+
+
+Op grond van grafiek hierboven worden PPP gegevens van 
+
+*   2016 als bruikbaar beschouwd. 
+*   2017 als niet bruikbaar beschouwd
+*   2018 als niet bruikbaar beschouwd, met uitzondering van metingen in augustus
+*   2019 als niet bruikbaar beschouwd (of zijn er nog meer metingen in 2019?)
+
+
+
+
+

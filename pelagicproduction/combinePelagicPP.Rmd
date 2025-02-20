@@ -1,0 +1,45 @@
+---
+title: "Samenstelling Primaire productiemetingen Schelde"
+author: "Willem Stolte"
+date: "2024-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(tidyverse)
+
+```
+
+
+## Vlaamse deel
+
+Uit Scheldemonitor:
+
+```{r}
+
+DataURL <- "https://geo.vliz.be/geoserver/Dataportal/wfs?service=wfs&version=1.1.0&typeName=abiotic_observations&request=GetFeature&outputFormat=text%2Fcsv&viewParams=where%3Aobs.context+%26%26+ARRAY%5B1%5D+AND+standardparameterid+IN+%2813642%5C%2C13650%5C%2C13648%5C%2C13651%5C%2C13641%5C%2C13645%29"
+httr::parse_url(DataURL)
+
+Vppdata <- read_csv(DataURL)
+
+ggplot(Vppdata) +
+  geom_point(aes(datetime, stationname)) +
+  facet_wrap("parametername", ncol = 1)
+
+```
+
+## Nederlands deel (Westerschelde en Scheldemonding)
+
+### RWS leveringen
+
+```{r}
+library(readr)
+
+X2020_westerschelde_PrimaireProductiePerDag <- read_csv("data/RWS/pelagic_pp/2020_westerschelde_PrimaireProductiePerDag.csv")
+X2021_westerschelde_PrimaireProductiePerDag <- read_csv("data/RWS/pelagic_pp/2021_westerschelde_PrimaireProductiePerDag.csv")
+X2022_westerschelde_PrimaireProductiePerDag <- read_csv("data/RWS/pelagic_pp/2022_westerschelde_PrimaireProductiePerDag.csv")
+
+```
+
+
