@@ -1,0 +1,229 @@
+---
+title: Harmonize and load NIOZ pelagic primary production data (Jacco)
+output: html_document
+date: 
+params:
+  loadInDB: true
+  currentdate: !r Sys.Date()
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(sf)
+library(data.table)
+library(leaflet)
+library(lubridate)
+library(readxl)
+```
+
+# goal is to extract integrated pp from RWS files and export them
+# into the database in "bewerkt"
+
+```{r loadData, warning=FALSE}
+
+pp_jacco <- list.files("../data/nioz/PPjacco", pattern = "GPP", full.names = T)
+
+data <- readxl::read_excel(
+  pp_jacco, 
+  col_types = c(
+    'numeric',
+    'text',
+    'numeric',
+    'numeric',
+    'numeric',
+    'numeric',
+    'numeric',
+    'numeric',
+    'numeric',
+    'numeric',
+    'numeric',
+    'numeric',
+    'numeric'
+  )
+) %>%
+  mutate(
+    numdate = as.numeric(Date),
+    numtime = as.numeric(Time),
+    numdatetime = numdate + numtime
+    ) %>%
+  mutate(
+    # datetime_text = (paste(DATUM, str_pad(TIJD, width = 6, side = "left", pad = "0"))),
+    date = as_date(numdate, origin = "1900-01-01 UTC"),
+    datetime = as_datetime(numdatetime*86400, origin = "1900-01-01 UTC") # check how excel converts dates to numbers
+  ) %>%
+
+  select(
+    station = STATIONCODE,
+    # X_RD = Longitude,
+    # Y_RD = Latitude,
+    datetime,
+    irradiance = Irradiance,
+    PP_depth_integrated = Production,
+    bottomdepth = Depth,
+    chlfa = Chla,
+    PBmax_EP = Pmax,
+    alfaB_EP = Alpha,
+    Eopt_EP = IOpt,
+    Kd
+    )
+
+```
+
+
+```{r addCoordinates}
+
+locations <- read_tsv("../data/nioz/PPjacco/locations.dat", comment = "#") %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326) %>%
+  st_transform(28992) %>%
+  dplyr::mutate(X_RD = sf::st_coordinates(.)[,1],
+                Y_RD = sf::st_coordinates(.)[,2])
+
+data2 <- data %>% 
+  left_join(locations %>% st_drop_geometry(), by = c(station = "StationCode"))
+
+```
+
+
+
+```{r assignCompartment}
+
+vakken <- st_read("../data/NIOZ/PPDick/vakken/polygons_NIOZ.geojson") %>%
+  rename(group = Group)
+
+data_sf <- data2 %>% filter(!is.na(X_RD), !is.na(Y_RD)) %>%
+  st_as_sf(coords = c("X_RD", "Y_RD"), crs = 28992) %>%
+  st_transform(4326) %>%
+  st_intersection(vakken)
+
+
+```
+
+
+
+
+
+```{r checkOnMap}
+
+pal <- leaflet::colorFactor(palette = "RdYlBu", domain = data_sf$name)
+
+data_sf %>% 
+  leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = vakken, 
+    label = ~ name, 
+    labelOptions = labelOptions(
+      noHide = T, 
+      textOnly = T
+      ), 
+    opacity = 0.2
+    ) %>%
+  leaflet::addCircleMarkers(
+    radius = 5, 
+    stroke = 1,
+    color = ~pal(name),
+    opacity = 1
+    ) %>%
+  leaflet::addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = data_sf$name,
+    opacity = 1
+  )
+```
+
+
+
+```{r}
+
+outData <- data2 %>%
+  left_join(
+    data_sf %>% 
+      st_drop_geometry() %>% 
+      select(
+        datetime, 
+        group, 
+        name
+        ),
+    by = c(datetime = "datetime")
+) %>%
+  mutate(
+    gebied = "Westerschelde",
+    source = "NIOZ_Jacco",
+    license = "limited",
+    method = "14C/scanfish",
+    date_added = params$currentdate,
+    script = "load_niozJacco_integrated_pp.Rmd"
+  ) %>%
+  select(
+    gebied,
+    # compartment = group,
+    compartiment = name,
+    datetime,
+    X_RD,
+    Y_RD,
+    irradiance,
+    PP_depth_integrated,
+    bottomdepth,
+    chlfa,
+    PBmax_EP,
+    alfaB_EP,
+    Eopt_EP,
+    Kd,
+    method,
+    date_added,
+    source,
+    script
+  ) %>%
+  mutate(
+    PP_depth_integrated = 1000 * PP_depth_integrated # from gC to mgC
+  ) %>%
+  pivot_longer(
+    cols = c(
+    irradiance,
+    PP_depth_integrated,
+    bottomdepth,
+    chlfa,
+    PBmax_EP,
+    alfaB_EP,
+    Eopt_EP,
+    Kd
+    ), 
+    names_to = "parameter", 
+    values_to = "value"
+  ) %>%
+
+# add units
+ 
+  mutate(
+    unit = case_match(
+      parameter,
+      "Kd" ~ "/m",
+      "bottomdepth" ~ "m",
+      "irradiance" ~ "µmol fotonen m-2 s-1",
+      "PP_depth_integrated" ~ "mg C/m2/d", # NOTE, in Jacco's metadata, it says gC/m2/d but is unlikely considering the numbers
+      "PBmax_EP" ~ "mgC (mg chla)-1 h-1",
+      "alfaB_EP" ~ "mgC (mg chla)-1 h-1)/(µmol fotonen m-2 s-1)",
+      "Eopt_EP" ~ "µmol fotonen m-2 s-1",
+      "O2" ~ "mg/l",
+      "chlfa" ~ "ug/l",
+      "pH" ~ "pH_units",
+      "perc_O2" ~ "%",
+      "salinity" ~ "PSU",
+      "turbidity" ~ "NTU", # gegokt voor sommige datasets
+    )
+  )
+
+```
+
+
+
+```{r}
+
+source("../functions/save_functions.R")
+write2CSV_pp(outData, "nioz_jacco_pp.csv")
+
+
+
+```
+

@@ -1,0 +1,216 @@
+---
+title: Harmonize and load NIOZ pelagic primary production data
+output: html_document
+date: 
+params:
+  loadInDB: true
+  currentdate: !r Sys.Date()
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(sf)
+library(data.table)
+library(leaflet)
+library(lubridate)
+```
+
+# goal is to extract integrated pp from RWS files and export them
+# into the database in "bewerkt"
+
+```{r}
+env_jacco <- list.files("../data/nioz/PPjacco", pattern = "csv", full.names = T)
+
+
+data1 <- read_csv(env_jacco[1]) %>%
+  mutate(
+    datetime_text = (paste(DATUM, str_pad(TIJD, width = 6, side = "left", pad = "0"))),
+    datetime = as_datetime(datetime_text)
+  ) %>%
+  select(
+    X_RD = Longitude,
+    Y_RD = Latitude,
+    datetime,
+    temperature = T,
+    pH,
+    chlfa = CHFLYSI,
+    O2,
+    perc_O2 = `%O2`,
+    salinity = SALNTT,
+    turbidity = TURBID
+  )
+
+
+data2 <- read_delim(env_jacco[2], delim = ";") %>%
+  mutate(
+    datetime_text = (paste(DATUM, str_pad(TIJD, width = 6, side = "left", pad = "0"))),
+    datetime = as_datetime(datetime_text)
+  ) %>%
+  select(
+    X_RD = Longitude,
+    Y_RD = Latitude,
+    datetime,
+    temperature = T,
+    pH,
+    chlfa = CHFLYSI,
+    O2,
+    perc_O2 = `%O2`,
+    salinity = SALNTT,
+    turbidity = TURBID,
+    Kd = Kd_F
+  )
+
+data3 <- read_csv(env_jacco[3]) %>%
+  mutate(
+    datetime_text = (paste(DATUM, str_pad(TIJD, width = 6, side = "left", pad = "0"))),
+    datetime = as_datetime(datetime_text)
+  ) %>%
+  select(
+    X_RD = Longitude,
+    Y_RD = Latitude,
+    datetime,
+    temperature = T,
+    pH,
+    chlfa = CHFLYSI,
+    O2,
+    perc_O2 = `O2_perc`,
+    salinity = SALNTT,
+    turbidity = TURBID,
+    Kd = Kd
+  )
+
+data <- bind_rows(
+  data1,
+  data2,
+  data3
+)
+
+```
+
+```{r assignCompartment}
+
+vakken <- st_read("../data/NIOZ/PPDick/vakken/polygons_NIOZ.geojson") %>%
+  rename(group = Group)
+
+data_sf <- data %>% filter(!is.na(X_RD), !is.na(Y_RD)) %>%
+  st_as_sf(coords = c("X_RD", "Y_RD"), crs = 28992) %>%
+  st_transform(4326) %>%
+  st_intersection(vakken)
+
+
+```
+
+
+
+
+
+```{r checkOnMap}
+
+pal <- leaflet::colorFactor(palette = "RdYlBu", domain = data_sf$name)
+
+data_sf %>% 
+  leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = vakken, 
+    label = ~ name, 
+    labelOptions = labelOptions(
+      noHide = T, 
+      textOnly = T
+      )
+    ) %>%
+  leaflet::addCircleMarkers(
+    radius = 2, 
+    stroke = 1,
+    color = ~pal(name),
+    opacity = 1
+    ) %>%
+  leaflet::addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = data_sf$name,
+    opacity = 1
+  )
+```
+
+
+
+```{r}
+
+outData <- data %>%
+  left_join(
+    data_sf %>% 
+      st_drop_geometry() %>% 
+      select(
+        datetime, 
+        group, 
+        name
+        ),
+    by = c(datetime = "datetime")
+) %>%
+  mutate(
+    gebied = "Westerschelde",
+    source = "NIOZ",
+    license = "can not be published without NIOZ permission",
+    method = "14C/scanfish",
+    date_added = params$currentdate,
+    script = "load_niozJacco_environmentals.Rmd"
+
+  ) %>%
+  select(
+    gebied,
+    # compartment = group,
+    compartiment = name,
+    datetime,
+    X_RD,
+    Y_RD,
+    turbidity,
+    chlfa,
+    salinity,
+    O2,
+    perc_O2,
+    pH,
+    method,
+    date_added,
+    source,
+    script,
+    license
+  ) %>%
+  pivot_longer(
+    cols = c(
+     turbidity,
+    chlfa,
+    salinity,
+    O2,
+    perc_O2,
+    pH
+    ), 
+    names_to = "parameter", 
+    values_to = "value"
+  ) %>%
+
+# add units
+ 
+  mutate(
+    unit = case_match(
+      parameter,
+      "O2" ~ "mg/l",
+      "chlfa" ~ "ug/l",
+      "pH" ~ "pH_units",
+      "perc_O2" ~ "%",
+      "salinity" ~ "PSU",
+      "turbidity" ~ "NTU",
+    )
+  )
+
+```
+
+
+
+```{r}
+
+source("../functions/save_functions.R")
+write2CSV_pp(outData, "nioz_jacco_env.csv")
+
+```
+

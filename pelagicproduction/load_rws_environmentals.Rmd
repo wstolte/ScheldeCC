@@ -1,0 +1,116 @@
+---
+title: Harmonize and load RWS environmental data
+output: html_document
+date: 
+params:
+  loadInDB: FALSE
+  currentdate: !r Sys.Date()
+---
+
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(sf)
+library(data.table)
+library(leaflet)
+```
+
+# goal is to extract integrated pp from RWS files and export them
+# into the database in "bewerkt"
+
+```{r}
+
+files <- list.files("../data/RWS/pelagic_pp/", pattern = "Westerschelde_PrimaireProductie", full.names = T)
+
+# in this version, Deelgebied 9 was called Deelgebied 0
+
+data <-  lapply(files, \(x) read_delim(x, delim = ";")) %>% 
+  bind_rows()
+
+```
+
+
+```{r checkOnMap}
+
+pal <- leaflet::colorFactor(palette = "RdYlBu", domain = data$Compartiment)
+
+data %>% 
+  filter(!is.na(XScanfish), !is.na(YScanfish)) %>%
+  st_as_sf(coords = c("XScanfish", "YScanfish"), crs = 28992) %>%
+  st_transform(4326) %>%
+  leaflet() %>%
+  addTiles() %>%
+  leaflet::addCircleMarkers(radius = 2, stroke = 1,
+    color = ~pal(Compartiment), 
+    opacity = 1
+    ) %>%
+  leaflet::addLegend(
+    position = "bottomright", 
+    pal = pal, 
+    values = data$Compartiment,
+    opacity = 1)
+```
+
+
+
+```{r}
+
+outData <- data %>%
+  mutate(
+    gebied = "Westerschelde",
+    source = "Rijkswaterstaat",
+    license = "CC0",
+    method = "FRRF/scanfish",
+    date_added = params$currentdate,
+    script = "load_rws_environmentals.Rmd"
+  ) %>%
+  select(
+    gebied,
+    compartiment = Compartiment,
+    datetime = DateTimeStartAms,
+    X_RD = XScanfish,
+    Y_RD = XScanfish,
+    turbidity = TURBIDScanfish,
+    chlfa = Chl_Frrf_Recalc,
+    salinity = SALNTTScanfish,
+    Kd,
+    source,
+    license,
+    method,
+    date_added,
+    script
+  ) %>%
+  pivot_longer(
+    cols = c(
+      turbidity,
+      chlfa,
+      salinity,
+      Kd
+    ), 
+    names_to = "parameter", 
+    values_to = "value"
+  ) %>%
+# add units
+  mutate(
+    unit = case_match(
+      parameter,
+      "O2" ~ "mg/l",
+      "chlfa" ~ "ug/l",
+      "pH" ~ "pH_units",
+      "perc_O2" ~ "%",
+      "salinity" ~ "PSU",
+      "turbidity" ~ "NTU",
+      "Kd" ~ "/m"
+    )
+  )
+
+```
+
+
+
+```{r}
+source("../functions/save_functions.R")
+write2CSV_pp(outData, "rws_env.csv")
+```
+

@@ -1,0 +1,116 @@
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(sf)
+library(data.table)
+library(leaflet)
+```
+
+# goal is to extract integrated pp from RWS files and export them
+# into the database in "bewerkt"
+
+```{r}
+
+files <- list.files("../data/RWS/pelagic_pp/", pattern = "Westerschelde_PrimaireProductie", full.names = T)
+
+# in this version, Deelgebied 9 was called Deelgebied 0
+
+data <-  lapply(files, \(x) read_delim(x, delim = ";")) %>% 
+  bind_rows()
+
+```
+
+
+```{r checkOnMap}
+
+pal <- leaflet::colorFactor(palette = "RdYlBu", domain = data$Compartiment)
+
+data %>% 
+  filter(!is.na(XScanfish), !is.na(YScanfish)) %>%
+  st_as_sf(coords = c("XScanfish", "YScanfish"), crs = 28992) %>%
+  st_transform(4326) %>%
+  leaflet() %>%
+  addTiles() %>%
+  leaflet::addCircleMarkers(radius = 2, stroke = 1,
+    color = ~pal(Compartiment), 
+    opacity = 1
+    ) %>%
+  leaflet::addLegend(
+    position = "bottomright", 
+    pal = pal, 
+    values = data$Compartiment,
+    opacity = 1)
+```
+
+
+
+```{r}
+
+outData <- data %>%
+  mutate(
+    gebied = "Westerschelde",
+    source = "RWS",
+    license = "CC0",
+    method = "FRRF/scanfish",
+    date_added = params$currentdate,
+    script = "load_rws_fitparameters_pp.Rmd"
+
+  ) %>%
+  select(
+    gebied,
+    compartiment = Compartiment,
+    datetime = DateTimeStartAms,
+    X_RD = XScanfish,
+    Y_RD = XScanfish,
+    PBmax_EP,
+    alfaB_EP,
+    Eopt_EP,
+    source,
+    license,
+    method,
+    date_added,
+    script
+  ) %>%
+  pivot_longer(
+    cols = c(
+      PBmax_EP,
+      alfaB_EP,
+      Eopt_EP
+    ), 
+    names_to = "parameter", 
+    values_to = "value"
+  ) %>%
+
+# add units
+ 
+  mutate(
+    unit = case_match(
+      parameter,
+      "Kd" ~ "/m",
+      "bottomdepth" ~ "m",
+      "irradiance" ~ "µmol fotonen m-2 s-1",
+      "PP_depth_integrated" ~ "mg C/m2/d", # NOTE, in Jacco's metadata, it says gC/m2/d but is unlikely considering the numbers
+      "PBmax_EP" ~ "mgC (mg chla)-1 h-1",
+      "alfaB_EP" ~ "mgC (mg chla)-1 h-1)/(µmol fotonen m-2 s-1)",
+      "Eopt_EP" ~ "µmol fotonen m-2 s-1",
+      "O2" ~ "mg/l",
+      "chlfa" ~ "ug/l",
+      "pH" ~ "pH_units",
+      "perc_O2" ~ "%",
+      "salinity" ~ "PSU",
+      "turbidity" ~ "NTU", # gegokt voor sommige datasets
+    )
+  )
+
+
+```
+
+
+
+```{r}
+source("../functions/save_functions.R")
+write2CSV_pp(outData, "rws_pp_fit.csv")
+
+```
+

@@ -1,0 +1,311 @@
+---
+title: Harmonize and load NIOZ pelagic primary production (integrated) data
+output: html_document
+date: 
+params:
+  loadInDB: true
+  currentdate: !r Sys.Date()
+---
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(sf)
+library(data.table)
+library(leaflet)
+library(lubridate)
+library(readxl)
+library(RSQLite)
+library(DBI)
+```
+
+# goal is to extract integrated pp from RWS files and export them
+# into the database
+
+```{r loadData, warning=FALSE}
+
+#=== photosynthesis parameters =======================================
+
+pp_Dick_param <- list.files("../data/nioz/PPDick/clean", pattern = "PP", full.names = T)
+
+# Compartiment van RWS (zie rapport),PI curve A(ccept) or R(eject) ,Chl uit FRRF (ug.L),Background corrrected fluorescence,Max fluorescence (background corrected),Fq  (background corrected),Fq / Fm (background corrected),,,Eilers - Peters model parameter,Eilers - Peters model parameter,Eilers - Peters model parameter,This and next columns: Meetvis data,,,,,,,
+
+
+dataParam <- read_csv(
+  pp_Dick_param
+) %>%
+  select(
+    X_RD = X,
+    Y_RD = Y,
+    datetime,
+    compartiment = box_RWS,
+    PBmax_EP = ps,
+    alfaB_EP = alpha,
+    Eopt_EP = eopt
+  )
+
+#==== locations and dates ========================================
+
+loc_Dick <- list.files("../data/nioz/PPDick/clean", pattern = "loc", full.names = T)
+
+dataLocs <- read_csv(
+  loc_Dick
+)
+
+#=== integrated production ===========================
+
+pp_Dick_integrated <- list.files("../data/nioz/PPDick/report", pattern = "xlsx", full.names = T)
+
+by <- join_by(closest(datetime <= datetime))
+# left_join(sales, promos, by)
+
+dataIntegrated = readxl::read_excel(pp_Dick_integrated) %>%
+  rename(
+    datetime = Datum,
+    compartiment = Compartiments
+  ) %>% 
+  arrange(datetime) %>%
+  left_join(dataLocs, by) %>%
+  mutate(timediff = difftime(datetime.y, datetime.x, units = "mins")) %>%
+  filter(abs(timediff) < 10) %>%
+  select(
+    X_RD,
+    Y_RD,
+    datetime = datetime.x,
+    compartiment,
+    PrimaireProductie_MgC_m2_dag = `Prim prod (mgC m-2 d-1)`,
+  )
+
+```
+
+
+
+```{r assignCompartment}
+
+vakken <- st_read("../data/NIOZ/PPDick/vakken/polygons_NIOZ.geojson") %>%
+  rename(group = Group)
+
+data_sf_integrated <- dataIntegrated %>% filter(!is.na(X_RD), !is.na(Y_RD)) %>%
+  st_as_sf(coords = c("X_RD", "Y_RD"), crs = 28992) %>%
+  st_transform(4326) %>%
+  st_intersection(vakken)
+
+data_sf_param <- dataParam %>% filter(!is.na(X_RD), !is.na(Y_RD)) %>%
+  st_as_sf(coords = c("X_RD", "Y_RD"), crs = 28992) %>%
+  st_transform(4326) %>%
+  st_intersection(vakken)
+
+```
+
+
+
+
+```{r checkOnMap}
+
+pal <- leaflet::colorFactor(palette = "RdYlBu", domain = dataIntegrated$name)
+
+data_sf_integrated %>%
+  leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = vakken, 
+    label = ~ name, 
+    labelOptions = labelOptions(
+      noHide = T, 
+      textOnly = T, 
+      opacity = 0.5
+      )
+    ) %>%
+  leaflet::addCircleMarkers(
+    radius = 2, 
+    stroke = 1,
+    color = ~pal(compartiment),
+    opacity = 1
+    ) %>%
+  leaflet::addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = dataIntegrated$compartiment,
+    opacity = 1
+  )
+```
+
+```{r checkOnMap}
+
+pal <- leaflet::colorFactor(palette = "RdYlBu", domain = dataIntegrated$name)
+
+data_sf_param %>%
+  leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = vakken, 
+    label = ~ name, 
+    labelOptions = labelOptions(
+      noHide = T, 
+      textOnly = T, 
+      opacity = 0.5
+      )
+    ) %>%
+  leaflet::addCircleMarkers(
+    radius = 2, 
+    stroke = 1,
+    color = ~pal(compartiment),
+    opacity = 1
+    ) %>%
+  leaflet::addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = dataIntegrated$compartiment,
+    opacity = 1
+  )
+```
+
+
+
+```{r}
+
+outData_integrated <- dataIntegrated %>%
+  left_join(
+    data_sf_integrated %>% 
+      st_drop_geometry() %>% 
+      select(
+        datetime, 
+        group, 
+        name
+        ),
+    by = c(datetime = "datetime")
+) %>%
+  mutate(
+    gebied = "Westerschelde",
+    source = "NIOZ_Dick",
+    license = "can not be published without NIOZ permission",
+    method = "14C incubation", 
+    date_added = params$currentdate,
+    script = "load_niozDick_integrated_pp.Rmd"
+  ) %>%
+  select(
+    gebied,
+    compartiment,
+    datetime,
+    X_RD,
+    Y_RD,
+    PP_depth_integrated = PrimaireProductie_MgC_m2_dag,
+    source,
+    license,
+    method,
+    date_added,
+    script
+  ) %>%
+  pivot_longer(
+    cols = c(
+    PP_depth_integrated
+    ), 
+    names_to = "parameter", 
+    values_to = "value"
+  ) %>%
+
+# add units
+ 
+  mutate(
+    unit = case_match(
+      parameter,
+      "PP_depth_integrated" ~ "mg C/m2/d",
+      "O2" ~ "mg/l",
+      "chlfa" ~ "ug/l",
+      "pH" ~ "pH_units",
+      "perc_O2" ~ "%",
+      "salinity" ~ "PSU",
+      "turbidity" ~ "NTU",
+    )
+  )
+
+
+```
+
+
+```{r}
+outData_params <- dataParam %>%
+  left_join(
+    data_sf_param %>% 
+      st_drop_geometry() %>% 
+      select(
+        datetime, 
+        group, 
+        name
+        ),
+    by = c(datetime = "datetime")
+) %>%
+  mutate(
+    gebied = "Westerschelde",
+    source = "NIOZ_Dick",
+    license = "can not be published without NIOZ permission",
+    method = "14C incubation", 
+    date_added = params$currentdate,
+    script = "load_niozDick_integrated_pp.Rmd"
+  ) %>%
+  select(
+    gebied,
+    compartiment,
+    datetime,
+    X_RD,
+    Y_RD,
+    PBmax_EP,
+    alfaB_EP,
+    Eopt_EP,
+    source,
+    license,
+    method,
+    date_added,
+    script
+  ) %>%
+  pivot_longer(
+    cols = c(
+    PBmax_EP,
+    alfaB_EP,
+    Eopt_EP
+    ), 
+    names_to = "parameter", 
+    values_to = "value"
+  ) %>%
+
+# add units
+ 
+  mutate(
+    unit = case_match(
+      parameter,
+      "PP_depth_integrated" ~ "mg C/m2/d",
+      "PBmax_EP" ~ "mgC (mg chla)-1 h-1",
+      "alfaB_EP" ~ "mgC (mg chla)-1 h-1)/(µmol fotonen m-2 s-1)",
+      "Eopt_EP" ~ "µmol fotonen m-2 s-1",
+      "O2" ~ "mg/l",
+      "chlfa" ~ "ug/l",
+      "pH" ~ "pH_units",
+      "perc_O2" ~ "%",
+      "salinity" ~ "PSU",
+      "turbidity" ~ "NTU", # gegokt voor sommige datasets
+    )
+  )
+
+```
+
+
+```{r combineData}
+
+outData = bind_rows(outData_integrated, outData_params) %>%
+  mutate(value = case_when(
+    year(datetime) == 2017 ~ NA_real_, 
+    year(datetime) == 2018 & month(datetime) != 8 ~ NA_real_,
+    year(datetime) == 2019 ~ NA_real_, 
+    .default = value
+  ))
+
+```
+
+
+```{r}
+
+source("../functions/save_functions.R")
+write2CSV_pp(outData, "nioz_dick_pp_integrated.csv")
+
+```
+
