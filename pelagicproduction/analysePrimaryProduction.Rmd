@@ -7,6 +7,7 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
 ```
 
 
@@ -23,45 +24,16 @@ pp <- dbGetQuery(conn, "SELECT * FROM primaryproduction")
 
 ```
 
-```{r}
-filelist <- list.files("../data/Deltares/combined_ppp/", full.names = T)
-filelist <- filelist[!grepl("old|mean", filelist)]
-
-pp <- lapply(filelist,
-             \(x) read_delim(x, delim = ";")
-) %>%
-  map(
-    \(x) x %>% mutate(compartiment = as.character(compartiment))
-  ) %>%
-  bind_rows() %>%
-  mutate(
-    compartiment = case_when(
-      grepl("7", compartiment) ~ "7", 
-      .default = compartiment
-    )
-  )
-
-```
-
-
-
-```{r}
-unique(pp$parameter)
-
-```
 
 ```{r}
 
-pp %>%
-  filter(parameter == "PP_depth_integrated") %>%
-  mutate(datetime = as_datetime(datetime)) %>%
-  mutate(year = year(datetime), month = month(datetime)) %>%
-  group_by(year, month, compartiment, source, method, parameter, unit) %>%
-  summarize(monthlyMean = mean(value, na.rm = T)) %T>%
-  write_delim("../data/Deltares/combined_ppp/monthly_mean_integrated_ppp") %>%
+read_delim("../data/Deltares/combined_ppp/monthly_mean_integrated_ppp.csv", delim = ";") %>%
   mutate(date = ymd(paste(year, month, 15))) %>%
   ggplot(aes(date, monthlyMean)) +
   geom_path(aes(color = source)) +
-  facet_wrap("compartiment")
+  geom_point(aes(color = source)) +
+  facet_wrap("compartiment") +
+  xlab("years") +
+  ylab("mg C/m2/d")
 ```
 

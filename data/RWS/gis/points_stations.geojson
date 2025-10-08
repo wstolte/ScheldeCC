@@ -1,15 +1,14 @@
 {
 "type": "FeatureCollection",
+"name": "points_stations",
 "crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
 "features": [
 { "type": "Feature", "properties": { "stationname": "Vlissingen boei SSVH", "latitude": 51.4129, "longitude": 3.56579 }, "geometry": { "type": "Point", "coordinates": [ 3.56579, 51.4129 ] } },
 { "type": "Feature", "properties": { "stationname": "Walcheren 2 km uit de kust", "latitude": 51.5481, "longitude": 3.4095 }, "geometry": { "type": "Point", "coordinates": [ 3.4095, 51.5481 ] } },
-{ "type": "Feature", "properties": { "stationname": "Walcheren 2 km uit de kust_P", "latitude": 51.548889, "longitude": 3.410833 }, "geometry": { "type": "Point", "coordinates": [ 3.410833, 51.548889 ] } },
 { "type": "Feature", "properties": { "stationname": "Hansweert geul", "latitude": 51.437, "longitude": 4.01439 }, "geometry": { "type": "Point", "coordinates": [ 4.01439, 51.437 ] } },
 { "type": "Feature", "properties": { "stationname": "Terneuzen boei 20", "latitude": 51.3474, "longitude": 3.8257 }, "geometry": { "type": "Point", "coordinates": [ 3.8257, 51.3474 ] } },
 { "type": "Feature", "properties": { "stationname": "Schaar van Ouden Doel", "latitude": 51.35118367, "longitude": 4.2509326 }, "geometry": { "type": "Point", "coordinates": [ 4.2509326, 51.35118367 ] } },
 { "type": "Feature", "properties": { "stationname": "Hansweert boei OHMG", "latitude": 51.44093528, "longitude": 3.99090663 }, "geometry": { "type": "Point", "coordinates": [ 3.99090663, 51.44093528 ] } },
-{ "type": "Feature", "properties": { "stationname": "Vlissingen boei SSVH", "latitude": 51.41288731, "longitude": 3.56579345 }, "geometry": { "type": "Point", "coordinates": [ 3.56579345, 51.41288731 ] } },
 { "type": "Feature", "properties": { "stationname": "Hooge Platen", "latitude": 51.3969, "longitude": 3.63428 }, "geometry": { "type": "Point", "coordinates": [ 3.63428, 51.3969 ] } },
 { "type": "Feature", "properties": { "stationname": "Hoedekenskerke boei 4", "latitude": 51.426, "longitude": 3.92081 }, "geometry": { "type": "Point", "coordinates": [ 3.92081, 51.426 ] } },
 { "type": "Feature", "properties": { "stationname": "Vlakte van de Raan", "latitude": 51.46421, "longitude": 3.30904 }, "geometry": { "type": "Point", "coordinates": [ 3.30904, 51.46421 ] } },
