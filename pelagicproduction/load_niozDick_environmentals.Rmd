@@ -1,0 +1,159 @@
+---
+title: Harmonize and load NIOZ pelagic primary production (integrated) data
+output: html_document
+date: 
+params:
+  loadInDB: true
+  currentdate: !r Sys.Date()
+---
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(sf)
+library(data.table)
+library(leaflet)
+library(lubridate)
+library(readxl)
+library(RSQLite)
+library(DBI)
+```
+
+# goal is to extract integrated pp from RWS files and export them
+# into the database
+
+```{r loadData, warning=FALSE}
+
+#=== environmental parameters from meetvis =======================================
+
+# times <- read_csv("../data\\NIOZ\\PPDick\\clean\\times-and-locations.csv")
+
+envs <- read_csv("../data\\NIOZ\\PPDick\\clean\\PPwithLocations.csv") %>%
+  select(
+    X_RD = X,
+    Y_RD = Y,
+    datetime,
+    compartiment = box_RWS,
+    Chl,
+    Turb,
+    SensH,
+    Temp,
+    pH,
+    Oxy,
+    Oxy_sat,
+    Sal
+  )
+
+#==== locations and dates ========================================
+
+loc_Dick <- list.files("../data/nioz/PPDick/clean", pattern = "loc", full.names = T)
+
+dataLocs <- read_csv(
+  loc_Dick
+)
+
+```
+
+
+
+```{r assignCompartment}
+
+vakken <- st_read("../data/NIOZ/PPDick/vakken/polygons_NIOZ.geojson") %>%
+  rename(group = Group)
+
+data_sf_env <- envs %>% filter(!is.na(X_RD), !is.na(Y_RD)) %>%
+  st_as_sf(coords = c("X_RD", "Y_RD"), crs = 28992) %>%
+  st_transform(4326) %>%
+  st_intersection(vakken)
+
+```
+
+
+
+
+```{r checkOnMap}
+
+pal <- leaflet::colorFactor(palette = "RdYlBu", domain = data_sf_env$name)
+
+data_sf_env %>%
+  leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = vakken, 
+    label = ~ name, 
+    labelOptions = labelOptions(
+      noHide = T, 
+      textOnly = T, 
+      opacity = 0.5
+      )
+    ) %>%
+  leaflet::addCircleMarkers(
+    radius = 2, 
+    stroke = 1,
+    color = ~pal(compartiment),
+    opacity = 1
+    ) %>%
+  leaflet::addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = data_sf_env$compartiment,
+    opacity = 1
+  )
+```
+
+
+
+```{r}
+
+outData_env <- envs %>%
+  select(
+    X_RD,
+    Y_RD,
+    datetime,
+    compartiment,
+    chlfa = Chl,
+    turbidity = Turb,
+    O2 = Oxy,
+    perc_O2 = Oxy_sat,
+    salinity = Sal
+  ) %>%
+  pivot_longer(
+      cols = c(-datetime, -compartiment, -X_RD, -Y_RD),
+      names_to = "parameter",
+      values_to = "value"
+  ) %>%
+  mutate(
+    gebied = "Westerschelde",
+    source = "NIOZ_Dick",
+    license = "can be used",
+    method = "Meetvis", 
+    date_added = params$currentdate,
+    script = "load_niozDick_environmentals.Rmd"
+  ) %>%
+
+# add units
+ 
+  mutate(
+    unit = case_match(
+      parameter,
+      "PP_depth_integrated" ~ "mg C/m2/d",
+      "O2" ~ "mg/l",
+      "chlfa" ~ "ug/l",
+      "pH" ~ "pH_units",
+      "perc_O2" ~ "%",
+      "salinity" ~ "PSU",
+      "turbidity" ~ "NTU",
+    )
+  )
+
+
+```
+
+
+```{r}
+
+source("../functions/save_functions.R")
+write2CSV_pp(outData_env, "nioz_dick_env.csv")
+
+```
+

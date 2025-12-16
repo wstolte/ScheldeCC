@@ -179,7 +179,7 @@ outData_integrated <- dataIntegrated %>%
     gebied = "Westerschelde",
     source = "NIOZ_Dick",
     license = "can not be published without NIOZ permission",
-    method = "14C incubation", 
+    method = "FRRF", 
     date_added = params$currentdate,
     script = "load_niozDick_integrated_pp.Rmd"
   ) %>%
@@ -239,7 +239,7 @@ outData_params <- dataParam %>%
     gebied = "Westerschelde",
     source = "NIOZ_Dick",
     license = "can not be published without NIOZ permission",
-    method = "14C incubation", 
+    method = "FRRF", 
     date_added = params$currentdate,
     script = "load_niozDick_integrated_pp.Rmd"
   ) %>%

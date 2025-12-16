@@ -52,8 +52,7 @@ outData <- data %>%
     gebied = "Westerschelde",
     source = "RWS",
     license = "CC0",
-    method = "FRRF/scanfish",
-    date_added = params$currentdate,
+    date_added = today(),
     script = "load_rws_integrated_pp.Rmd"
   ) %>%
   select(
@@ -66,7 +65,6 @@ outData <- data %>%
     conversionEtoC,
     source,
     license,
-    method,
     date_added,
     script
   ) %>%
@@ -77,6 +75,9 @@ outData <- data %>%
     ), 
     names_to = "parameter", 
     values_to = "value"
+  ) %>%
+  mutate(
+    method = "FRRF"
   ) %>%
 
 # add units

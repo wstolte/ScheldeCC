@@ -93,7 +93,7 @@ vakken <- st_read("../data/NIOZ/PPDick/vakken/polygons_NIOZ.geojson") %>%
 data_sf <- data2 %>% filter(!is.na(X_RD), !is.na(Y_RD)) %>%
   st_as_sf(coords = c("X_RD", "Y_RD"), crs = 28992) %>%
   st_transform(4326) %>%
-  st_intersection(vakken)
+  st_intersection(vakken, )
 
 
 ```
@@ -122,7 +122,8 @@ data_sf %>%
     radius = 5, 
     stroke = 1,
     color = ~pal(name),
-    opacity = 1
+    opacity = 1, 
+    label = ~stationname,
     ) %>%
   leaflet::addLegend(
     position = "bottomright",
@@ -151,7 +152,6 @@ outData <- data2 %>%
     gebied = "Westerschelde",
     source = "NIOZ_Jacco",
     license = "limited",
-    method = "14C/scanfish",
     date_added = params$currentdate,
     script = "load_niozJacco_integrated_pp.Rmd"
   ) %>%
@@ -170,7 +170,7 @@ outData <- data2 %>%
     alfaB_EP,
     Eopt_EP,
     Kd,
-    method,
+    # method,
     date_added,
     source,
     script
@@ -191,6 +191,24 @@ outData <- data2 %>%
     ), 
     names_to = "parameter", 
     values_to = "value"
+  ) %>%
+  mutate(
+    method = case_match(
+      parameter,
+      "Kd" ~ "scanfish",
+      # "bottomdepth" ~ "nvt",
+      # "irradiance" ~ "µmol fotonen m-2 s-1",
+      "PP_depth_integrated" ~ "14C incubation", 
+      "PBmax_EP" ~ "14C incubation",
+      "alfaB_EP" ~ "14C incubation",
+      "Eopt_EP" ~ "14C incubation",
+      # "O2" ~ "mg/l",
+      "chlfa" ~ "scanfish"
+      # "pH" ~ "pH_units",
+      # "perc_O2" ~ "%",
+      # "salinity" ~ "PSU",
+      # "turbidity" ~ "NTU", # gegokt voor sommige datasets
+    )
   ) %>%
 
 # add units

@@ -61,7 +61,7 @@ outData <- data %>%
     gebied = "Westerschelde",
     source = "Rijkswaterstaat",
     license = "CC0",
-    method = "FRRF/scanfish",
+    method = "Scanfish",
     date_added = params$currentdate,
     script = "load_rws_environmentals.Rmd"
   ) %>%
