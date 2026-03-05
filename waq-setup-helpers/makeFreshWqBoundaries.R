@@ -16,11 +16,12 @@ remove_outliers <- function(x, na.rm = TRUE, ...) {
   y
 }
 
-data("countriesHigh") 
-countriesHigh <- st_as_sf(countriesHigh)
+# data("countriesHigh") 
+# countriesHigh <- st_as_sf(countriesHigh)
 
 files <-  c("p:/11210350-002-sito-ps-oosterschel/02_pre-processing/Raw_data/ddl/standard/2025-10-30all_ddl_fysisch.csv",
-            "p:/11210350-002-sito-ps-oosterschel/02_pre-processing/Raw_data/ddl/standard/2025-06-27all_ddl_chemisch.csv",
+            "p:/11210350-002-sito-ps-oosterschel/02_pre-processing/Raw_data/ddl/standard/2025-11-18all_ddl_chemisch.csv",
+            "p:/11210350-002-sito-ps-oosterschel/02_pre-processing/Raw_data/ddl/standard/2025-11-19all_ddl_chemisch.csv",
             "p:/11210350-002-sito-ps-oosterschel/02_pre-processing/Raw_data/ddl/standard/2024-09-19all_ddl_chla.csv")
 
 # salinity for stations in Westerschelde are missing there. DDL does not return 
@@ -87,6 +88,8 @@ wq <- bind_rows(wq.list) %>%
     numeriekewaarde
   )
 
+wq %>% count(parameter.wat.omschrijving)
+
 wq_combined <- wq %>% 
   bind_rows(sal_stations) %>%
   mutate(
@@ -98,7 +101,8 @@ wq_combined <- wq %>%
     parameter_short = case_when(
       parameter.wat.omschrijving == "(massa)Concentratie ammonium in Oppervlaktewater uitgedrukt in stikstof / opgeloste fractie in mg/l"                ~ "NH4Nnf_mg/l",
       parameter.wat.omschrijving == "(massa)Concentratie fosfor totaal in Oppervlaktewater uitgedrukt in Fosfor na filtratie in mg/l"                    ~ "PorgPnf_mg/l",
-      parameter.wat.omschrijving == "(massa)Concentratie koolstof organisch in Oppervlaktewater uitgedrukt in koolstof / opgeloste fractie in mg/l"      ~ "CorgCpg_mg/l",
+      parameter.wat.omschrijving == "(massa)Concentratie koolstof organisch in Oppervlaktewater uitgedrukt in koolstof / opgeloste fractie in mg/l"      ~ "CorgCnf_mg/l",
+      parameter.wat.omschrijving == "(massa)Concentratie koolstof organisch in Oppervlaktewater uitgedrukt in Koolstof particulair gebonden in mg/l"     ~ "CorgCpg_mg/l",
       parameter.wat.omschrijving == "(massa)Concentratie nitraat in Oppervlaktewater uitgedrukt in stikstof / opgeloste fractie in mg/l"                 ~ "NO3Nnf_mg/l",
       parameter.wat.omschrijving == "(massa)Concentratie orthofosfaat in Oppervlaktewater uitgedrukt in Fosfor na filtratie in mg/l"                     ~ "PO4Pnf_mg/l",
       parameter.wat.omschrijving ==  "(massa)Concentratie siliciumdioxide in Oppervlaktewater uitgedrukt in Silicium na filtratie in mg/l"               ~ "SiO2Sinf_mg/l",
@@ -110,6 +114,8 @@ wq_combined <- wq %>%
       parameter.wat.omschrijving ==  "(massa)Concentratie chlorofyl-a in Oppervlaktewater ug/l"                                                         ~ "Chlfa_ug/l",
       parameter.wat.omschrijving ==  "(massa)Concentratie nitriet in Oppervlaktewater uitgedrukt in stikstof / opgeloste fractie in mg/l"               ~ "NO2Nnf_mg/l",
       parameter.wat.omschrijving ==  "Saliniteit in DIMSLS in oppervlaktewater"                                                                         ~ "Sal_psu",
+      parameter.wat.omschrijving == "Verzadigingsgraad zuurstof in Oppervlaktewater %"                                                                  ~ "O2sat_%",
+      parameter.wat.omschrijving == "(massa)Concentratie siliciumdioxide in Oppervlaktewater uitgedrukt in Silicium particulair gebonden in mg/l"       ~ "SiO2Sipg_mg/l",
       .default = parameter.wat.omschrijving 
     )
   ) %>%
@@ -168,7 +174,7 @@ wq_Sal %>% count(locatie.naam)
 wq_Sal %>% count(name)
 
 model <- wq_Sal %>%
-  group_by(year, quarter, name) %>%
+  group_by(year, quarter, month, name) %>%
   nest() %>%
   mutate(
     model = map(data, ~ lm(value ~ Sal_psu, data = .x)),
@@ -195,6 +201,7 @@ model %>%
   select(
     name,
     quarter,
+    month,
     data,
     augment
   ) %>%
@@ -202,10 +209,11 @@ model %>%
   ggplot(aes(data_Sal_psu, data_value)) +
   geom_point(aes(color = as.factor(year))) +
   geom_line(aes(augment_Sal_psu, augment_.fitted, color = as.factor(year))) +
-  facet_grid(name ~ quarter, scales = "free") +
-  theme(strip.text.y = element_text(angle = 0))
+  facet_grid(name ~ month, scales = "free") +
+  theme(strip.text.y = element_text(angle = 0)) +
+  ylim(c(0,NA))
 
-ggsave("waq-setup-helpers/results/nutrients_vs_salinity.png", height = 7.5, width = 9)
+ggsave("waq-setup-helpers/results/nutrients_vs_salinity.png", height = 10, width = 12)
 
 # write intercepts and averages to file.
 
@@ -217,13 +225,14 @@ model %>% ungroup() %>%
     name,
     year,
     quarter,
+    month,
     data,
     augment,
     intercept,
     slope
   ) %>%
   unnest(c(data, augment), names_sep = "_") %>%
-  ggplot(aes(quarter, intercept)) +
+  ggplot(aes(month, intercept)) +
   geom_line(aes(), linewidth = 1) +
   geom_point(aes(), size = 3) +
   facet_grid(name ~ year, scale = "free_y") +
@@ -231,7 +240,7 @@ model %>% ungroup() %>%
     strip.text.y = element_text(angle = 0)
   )
 
-ggsave("waq-setup-helpers/results/time_intercept_sal_nut.png", height = 7.5, width = 9)
+ggsave("waq-setup-helpers/results/time_intercept_sal_nut.png", height = 10, width = 12)
 
 
 # csv uitvoer maken met Delwaq namen
@@ -244,6 +253,7 @@ model %>% ungroup() %>%
     name,
     year,
     quarter,
+    month,
     intercept,
     std.error,
     slope
@@ -252,7 +262,7 @@ model %>% ungroup() %>%
     alpha = ifelse(year == 2018, 0.5, 0.3),
     size = ifelse(year == 2018, 2, 1)
   ) %>%
-ggplot(aes(color = as.factor(year), y = intercept, x = quarter)) +
+ggplot(aes(color = as.factor(year), y = intercept, x = month)) +
   geom_ribbon(
     aes(
       ymin = intercept - std.error,
@@ -284,6 +294,7 @@ model %>% ungroup() %>%
     name,
     year,
     quarter,
+    month,
     intercept,
     std.error,
     slope
@@ -300,6 +311,7 @@ model %>% ungroup() %>%
     name,
     year,
     quarter,
+    month,
     intercept,
     std.error,
     slope,
@@ -312,12 +324,13 @@ model %>% ungroup() %>%
     mean = signif(mean, 4)
   ) %>%
   mutate(
-    datetime = case_when(
-      quarter == "1" ~ "2014/01/01 00:00:00",
-      quarter == "2" ~ "2014/04/01 00:00:00",
-      quarter == "3" ~ "2014/07/01 00:00:00",
-      quarter == "4" ~ "2014/10/01 00:00:00"
-    )
+    # datetime = case_when(
+    #   quarter == "1" ~ "2014/01/01 00:00:00",
+    #   quarter == "2" ~ "2014/04/01 00:00:00",
+    #   quarter == "3" ~ "2014/07/01 00:00:00",
+    #   quarter == "4" ~ "2014/10/01 00:00:00"
+    # ),
+    datetime = ymd_hms(paste(paste(year, month, "01", sep = "/"), "00:00:00", sep = " "))
   ) %>%
   write_delim("waq-setup-helpers/results/freshwaterboundaries.csv", delim = ";")
 
