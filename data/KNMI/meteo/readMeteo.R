@@ -76,7 +76,7 @@ get_knmi_daydata_long <- function(start, end, vars = "Q:TG", stns = "310", prefe
 
 # example
 
-knmi_daily <- get_knmi_daydata_long(start = "19950101", end = "20250101", vars = c("Q:TG"), prefer_json = FALSE)
+knmi_daily <- get_knmi_daydata_long(start = "19900101", end = "20250101", vars = c("Q:TG"), prefer_json = FALSE)
 
 write_delim(knmi_daily, file = "data/KNMI/meteo/dailymeteo.csv", delim = ";")
 

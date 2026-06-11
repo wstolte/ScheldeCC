@@ -24,10 +24,10 @@ Build structural time‑series models for key photosynthesis parameters (**PBmax
 
 ## 2. Inputs, units, and conventions
 
--   **pp_wide.csv** – sporadic measurements per *compartiment* with columns:
-    -   `PBmax_EP` (mg C (mg Chl‑a)⁻¹ h⁻¹), `alfaB_EP` (mg C (mg Chl‑a)⁻¹ h⁻¹ per (µmol photons m⁻² s⁻¹)⁻¹), `Eopt_EP` (µmol photons m⁻² s⁻¹), `Kd` (m⁻¹), `chl_surface` (µg L⁻¹ ≡ mg m⁻³), optional `bottomdepth` (m), `irradiance_J_cm2` (J cm⁻² d⁻¹).
--   **knmi_daily.csv** – daily global short‑wave **Q** in **J cm⁻² d⁻¹** with station id `STN`.
--   Unit convention: 1 µg L⁻¹ Chl‑a = 1 mg m⁻³.
+- **pp_wide.csv** – sporadic measurements per *compartiment* with columns:
+  - `PBmax_EP` (mg C (mg Chl‑a)⁻¹ h⁻¹), `alfaB_EP` (mg C (mg Chl‑a)⁻¹ h⁻¹ per (µmol photons m⁻² s⁻¹)⁻¹), `Eopt_EP` (µmol photons m⁻² s⁻¹), `Kd` (m⁻¹), `chl_surface` (µg L⁻¹ ≡ mg m⁻³), optional `bottomdepth` (m), `irradiance_J_cm2` (J cm⁻² d⁻¹).
+- **knmi_daily.csv** – daily global short‑wave **Q** in **J cm⁻² d⁻¹** with station id `STN`.
+- Unit convention: 1 µg L⁻¹ Chl‑a = 1 mg m⁻³.
 
 ------------------------------------------------------------------------
 
@@ -35,9 +35,7 @@ Build structural time‑series models for key photosynthesis parameters (**PBmax
 
 KNMI provides global short‑wave radiation **Q** as energy per area per day (J cm⁻² d⁻¹). Plants respond to **PAR** (400–700 nm) quantified as photon flux. We convert global radiation to **PPFD** (µmol m⁻² s⁻¹) and **DLI** (mol m⁻² d⁻¹) using the widely adopted relation
 
-$$
- \text{PPFD} \;\approx\; R_g \times f_{\text{PAR}} \times c_{J\to\mu mol},
-$$
+$$ \text{PPFD} \;\approx\; R_g \times f_{\text{PAR}} \times c_{J\to\mu mol},$$
 
 where $R_g$ is mean irradiance in W m⁻² (= J m⁻² s⁻¹), $f_{\text{PAR}}$ is the PAR fraction (typ. 0.45–0.50), and $c_{J\to\mu mol}$ is the energy‑to‑quanta factor (default **4.6 µmol J⁻¹**). This is documented in the `bigleaf::Rg.to.PPFD` function and vignette. [1](https://search.r-project.org/CRAN/refmans/bigleaf/html/Rg.to.PPFD.html)[2](https://rdrr.io/cran/bigleaf/man/Rg.to.PPFD.html)
 
@@ -56,9 +54,9 @@ We also compute a **daylight‑mean PPFD** by dividing the DLI by astronomical d
 
 For each parameter $\theta \in \{P_{B\max},\,\alpha,\,E_{opt},\,K_d,\,\text{Chl}\}$, and for each `compartiment`, we fit a **structural regression** with:
 
--   **Seasonal cycle** via Fourier terms of order *K* with period 365 d (captures annual periodicity).
--   **Long‑term trend** via a natural spline $ns(t)$ (captures multi‑year drift/eutrophication/climate shifts).
--   **Spring bloom dynamics** via a set of **Gaussian basis functions** centred around DOY \~70–115 (width \~10 d) to represent the typical rapid March bloom.
+- **Seasonal cycle** via Fourier terms of order *K* with period 365 d (captures annual periodicity).
+- **Long‑term trend** via a natural spline $ns(t)$ (captures multi‑year drift/eutrophication/climate shifts).
+- **Spring bloom dynamics** via a set of **Gaussian basis functions** centred around DOY \~70–115 (width \~10 d) to represent the typical rapid March bloom.
 
 This is implemented in **tidymodels** as a **workflow** (recipe + linear model), fitted **per compartment**. It is a transparent, regularized alternative to a full state‑space filter and is easy to tune (K and df) and diagnose.
 
@@ -68,15 +66,13 @@ This is implemented in **tidymodels** as a **workflow** (recipe + linear model),
 
 We compute mass‑specific photosynthesis $P(E)$ from incident irradiance $E$ (µmol photons m⁻² s⁻¹) using the Eilers & Peeters steady‑state curve including photoinhibition:
 
-$$
- P(E) = \frac{E}{\tfrac{E^2}{\alpha E_{opt}^2} + \tfrac{E}{P_{B\max}} - \tfrac{2E}{\alpha E_{opt}} + \tfrac{1}{\alpha}}.
-$$
+$$ P(E) = \frac{E}{\tfrac{E^2}{\alpha E_{opt}^2} + \tfrac{E}{P_{B\max}} - \tfrac{2E}{\alpha E_{opt}} + \tfrac{1}{\alpha}}.$$
 
 This parameterization ($\alpha, E_{opt}, P_{B\max}$) is standard and documented in the `phytotools::fitEP` manual/help, which reproduces the EP model in this exact algebraic form. [3](https://rdrr.io/cran/phytotools/man/fitEP.html)[4](https://www.rdocumentation.org/packages/phytotools/versions/1.0/topics/fitEP)[5](https://github.com/cran/phytotools/blob/master/man/fitEP.Rd)
 
--   $\alpha$: initial slope at low light.
--   $E_{opt}$: optimum light where $P$ peaks.
--   $P_{B\max}$: maximum mass‑specific rate.
+- $\alpha$: initial slope at low light.
+- $E_{opt}$: optimum light where $P$ peaks.
+- $P_{B\max}$: maximum mass‑specific rate.
 
 Units are consistent with your inputs: $P(E)$ returns **mg C (mg Chl‑a)⁻¹ h⁻¹** for given $E$.
 
@@ -86,9 +82,7 @@ Units are consistent with your inputs: $P(E)$ returns **mg C (mg Chl‑a)⁻¹ h
 
 Assuming exponential light attenuation and vertically uniform chlorophyll (well‑mixed layer), irradiance at depth $z$ is $E(z) = E_0\,e^{-K_d z}$. The depth‑integrated **areal** production for a day is
 
-$$
- PP_{daily} = \left[\int_0^{Z} P(E_0 e^{-K_d z})\,\text{Chl}\;\mathrm{d}z\right] \times h_{day},
-$$
+$$ PP_{daily} = \left[\int_0^{Z} P(E_0 e^{-K_d z})\,\text{Chl}\;\mathrm{d}z\right] \times h_{day},$$
 
 with $Z$ (bottom depth), $h_{day}$ (hours integrated; here daylength). The integral is computed numerically per day with the predicted parameters and the day’s $E_0$ (PPFD). If vertical chlorophyll structure is available later, replace $\text{Chl}$ by $\text{Chl}(z)$ in the integrand.
 
@@ -113,23 +107,23 @@ The modeling choices (K for Fourier, df for trend, bloom timing) can be tuned vi
 
 ## 9. Assumptions and sensitivity
 
--   **PAR conversion**: we use $f_{PAR}=0.45$ and $4.6\,\mu mol\,J^{-1}$. Literature/practice commonly uses 0.45–0.50 and 4.6; differences in DLI are (\~10%). If local calibration exists, override in config. [1](https://search.r-project.org/CRAN/refmans/bigleaf/html/Rg.to.PPFD.html)[2](https://rdrr.io/cran/bigleaf/man/Rg.to.PPFD.html)
--   **Daylength vs 24 h**: we integrate during **daylight hours**, computing a daylight‑mean PPFD from DLI/Daylength (astronomical daylength approximation). This better matches diurnal forcing than a 24‑h average.
--   **Vertical homogeneity**: assumes **well‑mixed** water column; if stratified or if deep chlorophyll maxima are present, PP may be biased.
--   **No temperature/nutrients**: EP parameters are modeled from season/trend/bloom structure only. If temperature or nutrients are available, they can enter as covariates.
+- **PAR conversion**: we use $f_{PAR}=0.45$ and $4.6\,\mu mol\,J^{-1}$. Literature/practice commonly uses 0.45–0.50 and 4.6; differences in DLI are (\~10%). If local calibration exists, override in config. [1](https://search.r-project.org/CRAN/refmans/bigleaf/html/Rg.to.PPFD.html)[2](https://rdrr.io/cran/bigleaf/man/Rg.to.PPFD.html)
+- **Daylength vs 24 h**: we integrate during **daylight hours**, computing a daylight‑mean PPFD from DLI/Daylength (astronomical daylength approximation). This better matches diurnal forcing than a 24‑h average.
+- **Vertical homogeneity**: assumes **well‑mixed** water column; if stratified or if deep chlorophyll maxima are present, PP may be biased.
+- **No temperature/nutrients**: EP parameters are modeled from season/trend/bloom structure only. If temperature or nutrients are available, they can enter as covariates.
 
 ------------------------------------------------------------------------
 
 ## 10. References
 
--   Eilers & Peeters parametric form and usage: `phytotools::fitEP` documentation ([rdrr.io](https://rdrr.io/cran/phytotools/man/fitEP.html)) and RDocumentation mirror. [3](https://rdrr.io/cran/phytotools/man/fitEP.html)[4](https://www.rdocumentation.org/packages/phytotools/versions/1.0/topics/fitEP)
--   Algebraic EP form ($\alpha, E_{opt}, P_{B\max}$) also shown in GitHub mirror of CRAN man page. [5](https://github.com/cran/phytotools/blob/master/man/fitEP.Rd)
--   Global radiation → PAR conversions (PPFD, DLI) and factors ($f_{PAR}, 4.6\,\mu mol\,J^{-1}$): `bigleaf::Rg.to.PPFD` documentation. [1](https://search.r-project.org/CRAN/refmans/bigleaf/html/Rg.to.PPFD.html)[2](https://rdrr.io/cran/bigleaf/man/Rg.to.PPFD.html)
+- Eilers & Peeters parametric form and usage: `phytotools::fitEP` documentation ([rdrr.io](https://rdrr.io/cran/phytotools/man/fitEP.html)) and RDocumentation mirror. [3](https://rdrr.io/cran/phytotools/man/fitEP.html)[4](https://www.rdocumentation.org/packages/phytotools/versions/1.0/topics/fitEP)
+- Algebraic EP form ($\alpha, E_{opt}, P_{B\max}$) also shown in GitHub mirror of CRAN man page. [5](https://github.com/cran/phytotools/blob/master/man/fitEP.Rd)
+- Global radiation → PAR conversions (PPFD, DLI) and factors ($f_{PAR}, 4.6\,\mu mol\,J^{-1}$): `bigleaf::Rg.to.PPFD` documentation. [1](https://search.r-project.org/CRAN/refmans/bigleaf/html/Rg.to.PPFD.html)[2](https://rdrr.io/cran/bigleaf/man/Rg.to.PPFD.html)
 
 ------------------------------------------------------------------------
 
 ## 11. Reproducibility
 
--   Implemented in **tidyverse + tidymodels**.
--   Configuration collected at top of the script for easy changes (PAR factors, daylength integration, seasonal/trend complexity).
--   Outputs written to `output/` with deterministic code paths.
+- Implemented in **tidyverse + tidymodels**.
+- Configuration collected at top of the script for easy changes (PAR factors, daylength integration, seasonal/trend complexity).
+- Outputs written to `output/` with deterministic code paths.

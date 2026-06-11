@@ -14,10 +14,11 @@ suppressPackageStartupMessages({
 
 # --- Config ---
 cfg <- list(
-  file_pp   = "c://temp/pp_wide.csv",
-  file_knmi = "c://temp/knmi_daily.csv",
-  out_dir   = "output_st",
-  fig_dir   = "output_st/fig",
+  file_pp   = "temp/pp_wide.csv",
+  file_knmi = "temp/knmi_daily.csv",
+  par_knmi = "data/KNMI/meteo/dailyPAR.csv",
+  out_dir   = "output_latest",
+  fig_dir   = "output_latest/fig",
   
   # irradiance -> PAR conversion (customizable)
   frac_PAR  = 0.45,   # per your preference for NL greenhouse/field practice
@@ -44,7 +45,7 @@ cfg <- list(
   ),
   
   # date range for daily predictions
-  start_date = as.Date("2009-01-01"),
+  start_date = as.Date("1990-01-01"),
   end_date   = as.Date("2024-12-31")
 )
 
@@ -63,23 +64,8 @@ daylength_hours <- function(date, lat_deg = cfg$lat_deg) {
   2 * omega0 / (2*pi) * 24
 }
 
-calc_par_from_knmi <- function(knmi_df,
-                               frac_PAR = cfg$frac_PAR,
-                               J_to_mol = cfg$J_to_mol,
-                               use_daylength = cfg$use_daylength,
-                               lat_deg = cfg$lat_deg) {
-  knmi_df %>%
-    mutate(
-      J_m2_day = value * 1e4,          # J/m2/day  (J/cm2 -> J/m2)
-      W_m2_avg = J_m2_day / 86400,     # mean over 24h
-      PPFD_24h = W_m2_avg * frac_PAR * J_to_mol,    # µmol m-2 s-1
-      DLI_mol  = PPFD_24h * 86400 / 1e6
-    ) %>%
-    mutate(
-      hours_day = if (use_daylength) daylength_hours(datum, lat_deg) else 24,
-      PPFD_daylight = DLI_mol * 1e6 / (hours_day * 3600)
-    )
-}
+knmi_par <- read_delim(cfg$par_knmi, delim = ";")
+
 # Conversion refs: bigleaf::Rg.to.PPFD (frac_PAR, 4.6 µmol J^-1).  # [4](https://search.r-project.org/CRAN/refmans/bigleaf/html/Rg.to.PPFD.html)[5](https://rdrr.io/cran/bigleaf/man/Rg.to.PPFD.html)
 
 ep_rate <- function(E, alpha, Eopt, PBmax) {
@@ -117,21 +103,55 @@ depth_per_comp <- pp %>%
   # summarize(bottomdepth = suppressWarnings(median(bottomdepth, na.rm = TRUE)), .groups = "drop")
   summarize(bottomdepth = 10, .groups = "drop")
 
-knmi <- readr::read_csv(cfg$file_knmi, show_col_types = FALSE) %>%
-  # janitor::clean_names() %>%
-  mutate(datum = as.Date(datum)) %>%
-  filter(parameter == "Q")
+# --- Visusal inspection --------
+
+pp %>%
+  filter(
+    TRUE
+  ) %>%
+  select(
+    -turbidity
+  ) %>%
+  pivot_longer(
+    cols = -c(compartiment, date, conversionEtoC), 
+    names_to = "parameter", 
+    values_to = "value") %>%
+  mutate(month = month(date)) %>%
+  ggplot(aes(month, value)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "loess", span = 0.2) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  facet_wrap(
+    ~compartiment + parameter,
+    scales = "free", 
+    ncol = 6
+    )
+ggsave(file.path(pp_dir, "observations.png"), width = 12, height = 9)
+
+pp %>%
+  filter(
+    TRUE
+  ) %>%
+  select(
+    -turbidity
+  ) %>%
+  pivot_longer(
+    cols = -c(compartiment, date, conversionEtoC), 
+    names_to = "parameter", 
+    values_to = "value") %>%
+  mutate(month = month(date)) %>%
+  ggplot(aes(month, value)) +
+  geom_smooth(method = "loess", span = 0.2) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  facet_wrap(
+    ~compartiment + parameter,
+    scales = "free", 
+    ncol = 6
+  )
+ggsave(file.path(pp_dir, "observation_loess.png"), width = 12, height = 9)
 
 
-knmi_par <- calc_par_from_knmi(knmi,
-                               frac_PAR = cfg$frac_PAR,
-                               J_to_mol = cfg$J_to_mol,
-                               use_daylength = cfg$use_daylength,
-                               lat_deg = cfg$lat_deg) %>%
-  select(date = datum, STN, PPFD_24h, DLI_mol, hours_day, PPFD_daylight)
-
-
-# --- Modeling functions ---
+7# --- Modeling functions ---
 
 fit_model <- function(data_param,
                       param_col,
@@ -175,6 +195,69 @@ fit_model <- function(data_param,
       tidy   = map(fit, tidy)
     ) %>%
     select(compartiment, fit, aug, glance, tidy)
+}
+
+term_groups <- list(
+  trend    = c("^ns\\("),
+  seasonal = c("^sin_", "^cos_"),
+  bloom    = c("^bloom_")
+)
+
+# necessary for shapley component decomposition
+predict_components_lm <- function(fit, new_data, groups = term_groups) {
+  
+  eng <- parsnip::extract_fit_engine(fit)
+  mat <- predict(eng, newdata = new_data, type = "terms")
+  const <- as.numeric(attr(mat, "constant"))
+  
+  sum_by_pattern <- function(patterns) {
+    cols <- unique(unlist(purrr::map(patterns, \(p) grep(p, colnames(mat), value = TRUE))))
+    if (length(cols) == 0) rep(0, nrow(mat)) else rowSums(mat[, cols, drop = FALSE])
+  }
+  
+  comp_trend    <- sum_by_pattern(groups$trend)
+  comp_seasonal <- sum_by_pattern(groups$seasonal)
+  comp_bloom    <- sum_by_pattern(groups$bloom)
+  
+  tibble::tibble(
+    date      = new_data$date,
+    intercept = const,
+    trend     = const + comp_trend,
+    seasonal  = const + comp_seasonal,
+    bloom     = const + comp_bloom,
+    total     = const + rowSums(mat)
+  ) |>
+    tidyr::pivot_longer(-date, names_to = "component", values_to = "value")
+}
+
+# necessary for shapley component decompostion
+compute_shapley <- function(pp_subsets_wide) {
+  pp_subsets_wide %>%
+    mutate(
+      phi_trend =
+        (trend - none)/3 +
+        (ts - seasonal)/6 +
+        (tb - bloom)/6 +
+        (tsb - sb)/3,
+      
+      phi_seasonal =
+        (seasonal - none)/3 +
+        (ts - trend)/6 +
+        (sb - bloom)/6 +
+        (tsb - tb)/3,
+      
+      phi_bloom =
+        (bloom - none)/3 +
+        (tb - trend)/6 +
+        (sb - seasonal)/6 +
+        (tsb - ts)/3,
+      
+      PP_total     = tsb,
+      PP_intercept = none
+    ) %>%
+    select(compartiment, date,
+           PP_total, PP_intercept,
+           phi_trend, phi_seasonal, phi_bloom)
 }
 
 make_predictions <- function(models_list,
@@ -262,8 +345,129 @@ make_predictions <- function(models_list,
     )
 }
 
-# --- Fit models per parameter ---
-# 
+make_predictions_with_shapley <- function(models_list,
+                                          knmi_par_df,
+                                          depth_lookup,
+                                          alt_chl = NULL,
+                                          start_date = cfg$start_date,
+                                          end_date   = cfg$end_date,
+                                          use_daylight_mean = TRUE) {
+  
+  # --- 1. base pred_dates (zoals jij al doet) ---
+  base_dates <- tibble(date = seq.Date(start_date, end_date, by = "day"))
+  
+  pred_dates <- base_dates %>%
+    mutate(
+      tnum = as.numeric(date) / (24*3600),
+      doy  = lubridate::yday(date)
+    ) %>%
+    bind_cols(bloom_bases(.$doy))
+  
+  # helper: zet componenten "uit"
+  modify_subset <- function(df, subset) {
+    df2 <- df
+    
+    if (!grepl("t", subset)) {
+      df2$tnum <- mean(df2$tnum)
+    }
+    if (!grepl("s", subset)) {
+      df2$date <- base_dates$date[1]  # vaste datum → geen seizoen
+    }
+    if (!grepl("b", subset)) {
+      df2 <- df2 %>%
+        mutate(across(starts_with("bloom_"), ~0))
+    }
+    
+    df2
+  }
+  
+  subsets <- c("none","trend","seasonal","bloom",
+               "ts","tb","sb","tsb")
+  
+  subset_df <- purrr::map_dfr(subsets, function(s) {
+    modify_subset(pred_dates, s) %>%
+      mutate(subset = s)
+  })
+  
+  # --- 2. E0 en hours ---
+  E_df <- knmi_par_df %>%
+    transmute(
+      date,
+      hours_day,
+      E0 = if (use_daylight_mean) {
+        dplyr::coalesce(PPFD_daylight, PPFD_24h)
+      } else {
+        PPFD_24h
+      }
+    )
+  
+  # --- 3. voorspellen per subset (zelfde stijl als jouw code!) ---
+  preds <- purrr::imap(models_list, function(mtbl, pname) {
+    
+    mtbl %>%
+      mutate(
+        pred = purrr::map2(
+          fit, compartiment,
+          ~ predict(
+            .x,
+            new_data = subset_df %>%
+              mutate(compartiment = .y)
+          ) %>%
+            mutate(
+              date   = subset_df$date,
+              subset = subset_df$subset
+            )
+        )
+      ) %>%
+      select(compartiment, pred) %>%
+      unnest(pred) %>%
+      mutate(param = pname)
+    
+  }) %>%
+    list_rbind()
+  
+  # --- 4. naar wide parameters ---
+  pars_wide <- preds %>%
+    select(compartiment, date, subset, param, .pred) %>%
+    pivot_wider(names_from = param, values_from = .pred)
+  
+  # --- optional chl override ---
+  if (!is.null(alt_chl)) {
+    alt_chl2 <- alt_chl %>%
+      transmute(compartiment, date = as.Date(date), chl_alt = chl)
+    
+    pars_wide <- pars_wide %>%
+      left_join(alt_chl2, by = c("compartiment", "date")) %>%
+      mutate(Chl = coalesce(chl_alt, Chl)) %>%
+      select(-chl_alt)
+  }
+  
+  # --- 5. PP berekenen per subset ---
+  pp_subsets <- pars_wide %>%
+    left_join(E_df, by = "date") %>%
+    left_join(depth_lookup, by = "compartiment") %>%
+    mutate(
+      PP = pmap_dbl(
+        list(E0, Kd, bottomdepth, Chl, alpha, Eopt, PBmax, hours_day),
+        ~ pp_depth_integrated(
+          E0 = ..1, Kd = ..2, Z = ..3,
+          Chl_mg_m3 = ..4, alpha = ..5, Eopt = ..6,
+          PBmax = ..7, hours_day = ..8
+        )
+      )
+    )
+  
+  # --- 6. shapley ---
+  pp_wide <- pp_subsets %>%
+    select(compartiment, date, subset, PP) %>%
+    pivot_wider(names_from = subset, values_from = PP)
+  
+  shapley <- compute_shapley(pp_wide)
+  
+  shapley
+}
+
+
 models <- list()
 for (nm in names(cfg$params)) {
   col <- cfg$params[[nm]]
@@ -321,9 +525,6 @@ save_param_diagnostics <- function(models_for_param, pname) {
 iwalk(models, save_param_diagnostics)
 
 
-knmi_par <- knmi_par %>%
-  mutate(PPFD_daylight = DLI_mol * 1e6 / (hours_day * 3600))
-
 # --- Predict daily & compute PP (daylight integration) ---
 preds <- make_predictions(
   models_list = models,
@@ -335,7 +536,19 @@ preds <- make_predictions(
   use_daylight_mean = TRUE
 )
 
+preds_shapley <- make_predictions_with_shapley(
+  models_list = models,
+  knmi_par_df = knmi_par,
+  depth_lookup = depth_per_comp,
+  alt_chl = NULL,
+  start_date = cfg$start_date,
+  end_date   = cfg$end_date,
+  use_daylight_mean = TRUE
+)
+
 readr::write_csv(preds, file.path(cfg$out_dir, "daily_PP_predictions.csv"))
+
+readr::write_csv(preds_shapley, file.path(cfg$out_dir, "daily_PP_predictions_shapley.csv"))
 
 ann <- preds %>%
   group_by(compartiment, year = year(date)) %>%
@@ -367,9 +580,39 @@ preds %>%
       labs(title = paste("Dagelijkse primaire productie (comp", comp, ")"),
            x = "Datum", y = "mg C m^-2 d^-1") +
       theme_minimal() +
-      scale_x_date(breaks = "1 year", date_labels = "%Y")
+      scale_x_date(breaks = "5 year", date_labels = "%Y")
     ggsave(file.path(pp_dir, paste0("PP_timeseries_comp", comp, ".png")), p, width = 9, height = 4)
   })
+
+
+
+plot_pp_shapley <- function(shapley_df) {
+  shapley_long <- shapley_df %>%
+    pivot_longer(
+      c(phi_trend, phi_seasonal, phi_bloom),
+      names_to = "component",
+      values_to = "PP_contrib"
+    ) %>%
+    mutate(component = recode(component,
+                              phi_trend = "Trend",
+                              phi_seasonal = "Seasonal",
+                              phi_bloom = "Bloom"))
+  
+  ggplot(shapley_long,
+         aes(x = date, y = PP_contrib, fill = component)) +
+    geom_area(alpha = 0.7) +
+    facet_wrap(~ compartiment, scales = "free_y") +
+    scale_fill_brewer(palette = "Set2") +
+    theme_minimal(base_size = 14) +
+    labs(
+      title = "Shapley Decomposition of Primary Production",
+      x = NULL,
+      y = "Contribution to PP (mg C m⁻² d⁻¹)",
+      fill = "Component"
+    )
+}
+
+
 
 message("Done. See '", cfg$out_dir, "' for tables and '", cfg$fig_dir, "' for figures.")
 
@@ -391,4 +634,7 @@ message("Done. See '", cfg$out_dir, "' for tables and '", cfg$fig_dir, "' for fi
 #   use_daylight_mean = TRUE
 # )
 
+# Plot annual summaries
 
+file = "output_latest\annual_summaries.csv"
+ann_summ <- read_csv(file)
