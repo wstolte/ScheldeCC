@@ -1,6 +1,52 @@
 require(tidyverse)
 require(plotly)
 
+cfg <- list(
+  file_pp   = "temp/pp_wide.csv",
+  file_knmi = "data/KNMI/meteo/dailymeteo.csv",
+  input_path = "pelagicproduction\\calc_daily_pp\\input",
+  # out_dir   = "output_latest",
+  # fig_dir   = "output_latest/fig",
+  
+  # irradiance -> PAR conversion (customizable)
+  frac_PAR  = 0.45,   # per your preference for NL greenhouse/field practice
+  J_to_mol  = 4.6,    # µmol J^-1
+  
+  # integrate during daylight (not 24h)
+  use_daylength = TRUE,
+  lat_deg   = 51.4,         # approx Westerschelde; adjust if needed
+  tz        = "Europe/Amsterdam",
+  
+  # Seasonality & trend
+  K_fourier = 3,    # seasonal Fourier order
+  df_trend  = 1,    # ns() degrees of freedom for long-term trend
+  bloom_mus = c(70, 85, 100, 115),  # DOY centers
+  bloom_sigma = 15, # days (width)
+  
+  # Parameters to model  (names -> column names in pp_wide.csv)
+  params = c(
+    PBmax = "PBmax",
+    alpha = "alpha",
+    Eopt  = "Eopt",
+    Kd    = "Kd",
+    Chl   = "chl_surface"
+  ),
+  
+  # date range for daily predictions
+  start_date = as.Date("1990-01-01"),
+  end_date   = as.Date("2024-12-31")
+)
+
+daylength_hours <- function(date, lat_deg = cfg$lat_deg) {
+  d <- yday(date)
+  lat <- lat_deg * pi/180
+  delta <- 23.45 * sin(2*pi*(284 + d)/365) * pi/180
+  cos_omega0 <- -tan(lat) * tan(delta)
+  cos_omega0 <- pmax(pmin(cos_omega0,  1), -1)
+  omega0 <- acos(cos_omega0)
+  2 * omega0 / (2*pi) * 24
+}
+
 calc_par_from_knmi <- function(knmi_df,
                                frac_PAR = cfg$frac_PAR,
                                J_to_mol = cfg$J_to_mol,
@@ -20,7 +66,7 @@ calc_par_from_knmi <- function(knmi_df,
 }
 
 ## only necessary when new or more KNMI data are available
-knmi_daily <- read_delim(file = "data/KNMI/meteo/dailymeteo.csv", delim = ";")
+knmi_daily <- read_delim(file = cfg$file_knmi, delim = ";")
 knmi_daily_Q = knmi_daily %>% filter(parameter == "Q")
 
 knmi_par <- calc_par_from_knmi(knmi_daily_Q,
@@ -111,7 +157,7 @@ pp_wide <- pp_wide %>%
   # filter(year(date) < 2015) %>%
   filter(chl_surface <= 40)
 
-  write_csv(pp_wide, "temp/pp_wide.csv")
+write_csv(pp_wide, file.path(cfg$input_path, "pp_wide.csv"))
 
 knmi_daily_Q %>% 
-  write_csv("temp/knmi_daily.csv")
+  write_csv(file.path(cfg$input_path, "daily_par.csv"))

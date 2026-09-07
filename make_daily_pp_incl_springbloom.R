@@ -636,5 +636,10 @@ message("Done. See '", cfg$out_dir, "' for tables and '", cfg$fig_dir, "' for fi
 
 # Plot annual summaries
 
-file = "output_latest\annual_summaries.csv"
-ann_summ <- read_csv(file)
+ann %>%
+  filter(!compartiment %in% c(1, 4, 6)) %>%
+  ggplot(aes(year, PP_annual_gCm2)) +
+  geom_path() + geom_smooth(method = "lm") +
+  facet_grid("compartiment")
+
+

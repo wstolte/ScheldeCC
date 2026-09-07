@@ -27,7 +27,8 @@ pp <- dbGetQuery(conn, "SELECT * FROM primaryproduction")
 
 ```{r}
 
-read_delim("../data/Deltares/combined_ppp/monthly_mean_integrated_ppp.csv", delim = ";") %>%
+ppp_mean <- read_delim("../data/Deltares/combined_ppp/monthly_mean_integrated_ppp.csv", delim = ";") 
+ppp_mean %>%
   mutate(date = ymd(paste(year, month, 15))) %>%
   ggplot(aes(date, monthlyMean)) +
   geom_path(aes(color = source)) +
