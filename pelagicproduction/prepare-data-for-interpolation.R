@@ -2,7 +2,6 @@ require(tidyverse)
 require(plotly)
 
 cfg <- list(
-  file_pp   = "temp/pp_wide.csv",
   file_knmi = "data/KNMI/meteo/dailymeteo.csv",
   input_path = "pelagicproduction\\calc_daily_pp\\input",
   # out_dir   = "output_latest",

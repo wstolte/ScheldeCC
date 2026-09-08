@@ -1,0 +1,324 @@
+---
+title: "Primary Production with Consistent Tidymodels Workflows (Fixed Columns)"
+output: html_document
+params:
+  input_path: "input"
+  files_pp_wide: "pp_wide.csv"
+  files_knmi_daily: "../../data/KNMI/meteo/dailymeteo.csv"
+  files_daily_par: "daily_par.csv"
+  files_pp_obs: "../../data/Deltares/combined_ppp/monthly_mean_integrated_ppp.csv"
+  # Physical / model constants
+  f_par: 0.45
+  umol_per_J: 4.57
+  default_bottomdepth: 10
+  dz: 0.25
+  hours_per_day: 24
+  # STM settings
+  stm_fourier_K: 5
+  stm_bloom1_center: 75
+  stm_bloom1_sigma: 10
+  stm_bloom2_center: 95
+  stm_bloom2_sigma: 15
+  # Output dirs
+  out_dir_lm:  "output_lm"
+  out_dir_gam: "output_gam"
+  out_dir_stm: "output_stm"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(mgcv)
+library(zoo)
+library(tidymodels)
+library(modeltime)
+library(timetk)
+# library(iml)
+# library(fs)
+# library(patchwork)
+
+source('functions.R')
+
+theme_set(theme_minimal())
+p <- params
+```
+
+# 1. Doel & Opzet (vaste kolomnamen)
+
+We bouwen drie modellen per **compartiment** met
+**tidymodels‑workflows** en gebruiken **exact de kolomnamen** uit jouw
+bestanden:
+
+- **`pp_wide.csv`**: `compartiment` (wordt hernoemd naar `compartment`),
+  `date`, **parameters** `PBmax`, `alpha`, `Eopt`, `Kd`, `chl_surface`,
+  plus `turbidity`, `conversionEtoC`, `irradiance_J_cm2`.
+- **`knmi_daily.csv`**: `datum`, `STN`, `parameter`, `value`, `unit`
+  (waarbij **`parameter == "Q"`** globale instraling is). Eenheden zijn
+  **J/cm²/dag** of **J/m²/dag** afhankelijk van `unit`.
+- **`monthly_mean_integrated_ppp.csv`**: `date`, `compartment` *(of
+  `compartiment`)*, `PP_depth_integrated` (hernoemd naar `PP_observed`).
+
+Alle **drie** modellen zijn **tidymodels‑workflows**: 1)
+**LM/interpolatie** (recipe‑only met `step_ts_impute(method='linear')`)
+2) **GAM** (`gen_additive_mod(engine='mgcv')`, log‑schaal,
+**lange‑termijn** + **seizoens** spline) 3) **STM** (`prophet_reg()`)
+met **trend + Fourier‑seizoenen + spring‑bloom** basissen.
+
+De parameters voeden de **Eilers–Peeters** fotoinhibitie‑vergelijking;
+vervolgens integreren we over **diepte** (exponentiële lichtverzwakking)
+en **tijd** (daggemiddelde of `hours_per_day`).
+
+> **Bronnen**: Eilers & Peeters (1988) en de EP‑implementatie in
+> `phytotools`/CRAN, die exact dezelfde functionele vorm gebruikt
+> citeturn12search45turn12search46turn12search44. Voor
+> **PAR‑conversie** hanteren we de vuistregel **4.57 µmol J⁻¹** en
+> **PAR‑fractie** van kortgolvige straling (defaults 0.45), conform
+> gangbare horticulture‑/ecofysica‑documentatie en het R‑pakket
+> **bigleaf** (defaults 4.6 µmol J⁻¹; 0.5)
+> citeturn12search41turn12search38. De KNMI‑parameter **Q** is
+> globale straling (J/cm² per tijdvak) in de operationele definities en
+> wordt door ons per dag geaggregeerd/ gemiddeld over stations
+> citeturn12search19turn12search18. Voor **GAM‑splines** (waaronder
+> `bs='cc'` cyclisch) volgen we **mgcv** documentatie
+> citeturn12search25turn12search29. **Prophet** (STM) is gebaseerd
+> op Taylor & Letham (2017/2018) citeturn12search30turn12search35.
+
+------------------------------------------------------------------------
+
+# 2. Theorie & vergelijkingen
+
+## 2.1 Omrekening straling → PAR (daggemiddeld)
+
+We gebruiken **KNMI** globale straling **Q** (J/cm²/dag of J/m²/dag).
+Eerst naar **J/m²/dag**: $$E_{\mathrm{J\,m^{-2}\,d^{-1}}} =
+\begin{cases}
+\texttt{value} \times 10^{4}, & \text{als unit = J/cm}^2/\text{dag}\\
+\texttt{value}, & \text{als unit = J/m}^2/\text{dag}
+\end{cases}$$ Neem vervolgens de fractie die in het **PAR‑spectrum**
+valt ($f_{PAR}$) en zet energie om naar fotonen met
+$\kappa \approx 4.57\,\mu\mathrm{mol\,J^{-1}}$ (zonlicht‑gemiddeld):
+$$\mathrm{PAR}_{\mathrm{mol\,m^{-2}\,d^{-1}}} = f_{PAR} \cdot E_{\mathrm{J\,m^{-2}\,d^{-1}}} \cdot (\kappa\cdot 10^{-6})$$
+Daggemiddelde **PAR** (µmol m⁻² s⁻¹) over 24 uur:
+$$\overline{I}_0 = \mathrm{PAR}_{\mathrm{mol\,m^{-2}\,d^{-1}}} \cdot \frac{10^{6}}{86400}$$
+Als **KNMI** ontbreekt gebruiken we `irradiance_J_cm2` uit **pp_wide**
+als fallback (zelfde conversie, met J/cm²/dag → J/m²/dag).
+citeturn12search41turn12search38turn12search19turn12search18
+
+## 2.2 Lichtverzwakking met diepte
+
+We nemen **Beer–Lambert** demping met **extinctiecoëfficiënt** $K_d$
+(m⁻¹): $$I(z) = \overline{I}_0\; \exp(-K_d\, z), \qquad z \in [0,H]$$
+
+## 2.3 Eilers–Peeters (EP) met fotoinhibitie
+
+We gebruiken de **drie‑parameter** EP‑vorm met $\alpha$ (initiële
+helling), $E_{opt}$ (optimale belichting), en $P_{B\max}$
+(massaspecifieke maximale productie). Met $E\equiv I$ (µmol m⁻² s⁻¹):
+$$P_B(E)\;=\; \frac{E}{\;\dfrac{E^2}{\alpha\,E_{opt}^2}\; +\; \dfrac{E}{P_{B\max}}\; -\; \dfrac{2E}{\alpha\,E_{opt}}\; +\; \dfrac{1}{\alpha}\;}\quad\left[\,\frac{\mathrm{mg\,C}}{\mathrm{mg\,chla\,h}}\,\right]$$
+Deze vorm is equivalent aan de implementatie in **phytotools::fitEP** en
+leidt tot een **fotoinhibitie‑piek** bij $E\approx E_{opt}$
+citeturn12search44turn12search45.
+
+## 2.4 Dagelijkse diepte‑integratie
+
+Met **uniforme** chlorofylconcentratie
+$C_{chl}(z)\equiv C_{chl,\,surf}=\texttt{chl\_surface}$ (µg L⁻¹ ≡
+mg m⁻³) en kolomhoogte $H$ (m):
+$$P_{\mathrm{day}} = \int_0^{T} \int_0^{H} P_B\big(I(z)\big)\;C_{chl,\,surf}\;\mathrm{d}z\;\mathrm{d}t
+\approx T\,\int_0^{H} P_B\big(\overline{I}_0\,e^{-K_d z}\big)\;C_{chl,\,surf}\;\mathrm{d}z$$
+waar $T$ het aantal te integreren uren per dag is (default **24**).
+Numerieke integratie verloopt met trapezia over **dz** (default 0.25 m).
+Resultaat in **mg C m⁻² d⁻¹**.
+
+## 2.5 Modelvergelijkingen (parameters op log‑schaal)
+
+**Model 1 (LM/interpolatie)**\
+Voor elke parameter
+$\theta_t \in \{\,P_{B\max},\alpha,E_{opt},K_d, C_{chl,\,surf}\,\}$:
+lineaire interpolatie in de tijd via `step_ts_impute(method='linear')`
+(tidymodels‑recipe).
+
+**Model 2 (GAM)**\
+Voor elke parameter (op **log‑schaal**):\
+$$\log\theta_t = f_{LT}(t) + f_{SEAS}(\mathrm{doy}(t)) + \varepsilon_t,$$
+met $f_{LT}$ een thin‑plate spline (*bs="tp"*) en $f_{SEAS}$ een
+**cyclische** kubische spline (*bs="cc"*) op dag‑van‑het‑jaar.
+Smoothingparameters via REML. citeturn12search25turn12search29
+
+**Model 3 (STM)**\
+Voor elke parameter (log‑schaal) een **additief** model:
+$$\log\theta_t = g(t) + s_{Fourier}(t) + s_{bloom}(t) + \varepsilon_t,$$
+waar **`prophet_reg()`** de trend $g(t)$ en Fourier‑seizoenen schat;
+**spring‑bloom** wordt gemodelleerd via Gaussische basissen rond
+DOY‑centra (tune‑baar). citeturn12search30turn12search35
+
+**SHAP‑decompositie (STM)**\
+We groeperen features in **long_term**, **seasonal** (Fourier), en
+**spring_bloom** en sommeren SHAP‑bijdragen per groep (iml::Shapley).
+
+------------------------------------------------------------------------
+
+# 3. Data inlezen & voorbereiden
+
+```{r data}
+# pp_wide
+
+pp <- read_csv(file.path(p$input_path, p$files_pp_wide), show_col_types = FALSE) %>%
+  rename(compartment = compartiment) %>%
+  mutate(compartment = as.character(compartment))   # <-- type afdwingen
+
+# KNMI (datum, STN, parameter, value, unit)
+dir_knmi <- read_delim(p$files_knmi_daily, delim = ";", show_col_types = FALSE)
+knmi <- dir_knmi %>%
+  mutate(datum = ymd(datum)) %>%
+  compute_incident_PAR_knmi(f_par = p$f_par, umol_per_J = p$umol_per_J)   # -> date + PAR
+
+# calculation done in preparation script (but format differs)
+# knmi <- read_csv(file.path(p$input_path, p$files_daily_par))
+
+# Observaties (PP)
+obs <- read_delim(p$files_pp_obs, show_col_types = FALSE, delim = ";") %>%
+  mutate(date = as_date(as_date(paste(year, month, "15")))) %>%
+  rename(
+    PP_observed = monthlyMean,
+    compartment = compartiment
+  ) %>%
+  # mutate(compartment = as.character(compartiment)) %>%
+  select(date, compartment, PP_observed)
+
+# Fallback PAR uit pp_wide (irradiance_J_cm2)
+par_pp <- compute_incident_PAR_from_pp(pp, f_par = p$f_par, umol_per_J = p$umol_per_J)  # date + PAR_pp
+
+# Combineer: KNMI prefereerd
+PAR <- prefer_knmi_PAR(knmi, par_pp)
+
+# Merge voor modellering
+pp_all <- pp %>% left_join(PAR, by = 'date') %>% arrange(compartment, date)
+
+comps <- unique(pp_all$compartment)
+length(comps); head(comps)
+```
+
+# 4. Modellen fitten per compartiment (tidymodels)
+
+```{r fit, warning=FALSE}
+
+dirs <- c(p$out_dir_lm, p$out_dir_gam, p$out_dir_stm)
+sapply(dirs, dir.create)
+
+fits <- map(comps, function(cp){
+  d <- filter(pp_all, compartment == cp)
+  list(
+    lm  = fit_model_tidy_realcols(d, model = 'lm'),
+    # gam = fit_model_tidy_realcols(d, model = 'gam'),
+    stm = fit_model_tidy_realcols(d, model = 'stm', stm_cfg = list(
+      fourier_K = p$stm_fourier_K,
+      bloom1_center = p$stm_bloom1_center,
+      bloom1_sigma  = p$stm_bloom1_sigma,
+      bloom2_center = p$stm_bloom2_center,
+      bloom2_sigma  = p$stm_bloom2_sigma
+    ))
+  )
+})
+
+names(fits) <- comps
+```
+
+# 5. Dagelijkse PP voorspellen (EP + integratie)
+
+```{r predict}
+preds <- imap(fits, function(fit_list, cp){
+  list(
+    lm  = make_predictions_realcols(fit_list$lm,  irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_lm,  dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
+    # gam = make_predictions_realcols(fit_list$gam, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_gam, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
+    stm = make_predictions_realcols(fit_list$stm, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_stm, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth)
+  )
+})
+```
+
+# 6. Visualisaties & Diagnostiek
+
+## 6.1 Tijdreeks PP (model vs observaties)
+
+```{r pp-ts, fig.width=9, fig.height=10}
+plot_pp_timeseries <- function(pred_df, obs_df, compartment){
+  obs_sel <- obs_df %>% filter(compartment == !!compartment)
+  pred_df %>% left_join(obs_sel, by = c('date','compartment')) %>%
+    ggplot(aes(date)) +
+    geom_line(aes(y = PP_model, colour='Model')) +
+    geom_point(aes(y = PP_observed, colour='Observed'), alpha=0.6) +
+    scale_colour_manual(values=c('Model'='#1f77b4','Observed'='#d62728')) +
+    labs(y='Depth-integrated PP (mg C m^-2 d^-1)', colour='') +
+    ggtitle(paste('Compartment:', compartment)) +
+    theme_minimal()
+}
+
+example_cp <- as.numeric(comps[1])
+pp_ts_lm  <- plot_pp_timeseries(preds[[example_cp]]$lm,  obs, example_cp)
+# pp_ts_gam <- plot_pp_timeseries(preds[[example_cp]]$gam, obs, example_cp)
+pp_ts_stm <- plot_pp_timeseries(preds[[example_cp]]$stm, obs, example_cp)
+pp_ts_lm  / pp_ts_stm
+```
+
+## 6.2 Parameterreeksen
+
+```{r param-ts, fig.width=9, fig.height=6}
+plot_parameters <- function(fitted_obj, compartment){
+  fitted_obj$params %>%
+    pivot_longer(c(PBmax, alpha, Eopt, Kd, chl_surface), names_to='parameter', values_to='value') %>%
+    ggplot(aes(date, value)) +
+    geom_line() +
+    facet_wrap(~parameter, scales='free_y', ncol=2) +
+    labs(title=paste('Parameter estimates -', compartment), y=NULL, x=NULL)
+}
+plot_parameters(fits[[example_cp]]$gam, example_cp)
+```
+
+## 6.3 GAM componenten (lange termijn vs seizoens)
+
+```{r gam-components, fig.width=9, fig.height=5}
+plot_gam_components_realcols(fits[[example_cp]]$gam, param='PBmax')
+```
+
+## 6.4 STM SHAP (lange termijn / seizoens / spring bloom)
+
+```{r shap, fig.width=9, fig.height=5}
+shap_df <- compute_stm_shap_realcols(fits[[example_cp]]$stm, parameter='PBmax')
+plot_stm_shap(shap_df)
+```
+
+## 6.5 Observed vs Predicted & Residuen (alle parameters)
+
+```{r diagnostics, fig.width=12, fig.height=9}
+plot_param_diagnostics_generic_realcols(fits[[example_cp]]$lm,  original_df = filter(pp_all, compartment==example_cp), title_suffix='LM')
+plot_param_diagnostics_generic_realcols(fits[[example_cp]]$gam, original_df = filter(pp_all, compartment==example_cp), title_suffix='GAM')
+plot_param_diagnostics_generic_realcols(fits[[example_cp]]$stm, original_df = filter(pp_all, compartment==example_cp), title_suffix='STM')
+```
+
+## 6.6 Vergelijk PP tussen modellen
+
+```{r compare, fig.width=7, fig.height=4}
+
+# Voorbeeld-aanroep
+example_cp <- comps[3]
+compare_pp_models_with_obs(preds[[example_cp]], example_cp, obs)
+```
+
+# 7. Reproduceerbaarheid & aannames
+
+- **PAR‑conversie**: $f_{PAR}$ en $\kappa$ zijn benaderingen; kies
+  sitespecifiek indien beschikbaar (sensor‑spectrum/kalibratie).
+  citeturn12search41turn12search38
+- **Dagelijkse integratie**: we gebruiken $\overline{I}_0$
+  (daggemiddelde). Een diurnale curve of daglicht‑uren kan worden
+  toegevoegd.
+- **Chlorofyl‑profiel**: aangenomen **uniform**; kan worden uitgebreid
+  met $C_{chl}(z)$.
+- **STM**: componenten trend/seizoen/bloom zijn additief en worden
+  **log‑schaal** gemodelleerd; zie Prophet‑referenties.
+  citeturn12search30turn12search35
+- **GAM**: seizoenscomponent is **cyclisch** via `bs='cc'`.
+  citeturn12search25turn12search29 \`\`\`

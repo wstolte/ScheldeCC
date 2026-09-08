@@ -1,0 +1,77 @@
+
+assignment: Make a structural time series model and predict primary production based on the model
+
+make an Rmd file with precise scientific description of all the steps in the methodology in markdown text and code in code blocks. Make a separate .R file for all functions. 
+
+input: 
+- pp_wide.csv, all measured parameters, including calculated integrated primary production (see below) 
+- knmi_daily.csv (with daily irradiance)
+
+Parameters have the following units and constraints
+   parameter           unit                                        
+ 1 chlfa               ug/l                                        0 - 40
+ 2 turbidity           NTU                                         > 0
+ 3 O2                  mg/l                                        0 - 15
+ 4 perc_O2             %                                           0 - 100
+ 5 salinity            PSU                                         0 - 35
+ 6 PP_depth_integrated mg C/m2/d                                   > 0
+ 7 PBmax_EP            mgC (mg chla)-1 h-1                         > 0
+ 8 alfaB_EP            mgC (mg chla)-1 h-1)/(µmol fotonen m-2 s-1) > 0
+ 9 Eopt_EP             µmol fotonen m-2 s-1                        > 0
+10 pH                  pH_units                                    > 0
+11 irradiance_J_cm2    J/cm2                                       > 0
+12 bottomdepth         m                                           > 0
+13 Kd                  /m                                          > 0
+14 conversionEtoC      molC/(mol fotons)                           > 0
+
+do
+
+- calculate incident PAR from irradiance
+
+make functions 
+- "fit_model"
+- "make_predictions"
+
+use R tidyverse and tidymodel workflows
+
+fit parameters:
+- PBmax (>0)
+- alpha (>0)
+- Eopt (>0)
+- Kd (>0)
+- Chl_surface (chlorophyll a in ug/l) (>0)
+
+Test the distribution of all parameters. Remove outliers (based on all compartments per parameter), perpare for transformations if needed based on the distributions. 
+
+prepare and run the model "long-term, seasonal and springbloom model" (LSS, output in "output_lss")
+
+it includes:
+- seasonal pattern with maximum during summer (all fit parameters except Kd)
+- seasonal pattern with minimum during summer (Kd)
+- long term linear term (all fit parameters)
+- method to include the spring bloom dynamics (depending on compartment, usually a short burst of chlfa around March - May each year) this only applies to PBmax, alpha, and Chl_surface
+
+Make models per compartiment
+
+use fitted parameters to calculate daily primary production using an Eilers Peters model with photoinhibition using
+- fitparameters Pmax, alpha and Eopt
+- Chlorophyll-a
+- Kd
+- irradiance (for each day)
+
+Visualize the contribution per model component (linear, season, spring bloom). Use an appropriate method
+
+for each model save data and plots of:
+- time series depth integrated daily modelled pp and daily observed pp (in dataset as PP_depth_integrated)
+- XY diagrams of modelled vs observed vertically integrated production
+- time series of all parameter estimates
+- diagnostics
+- observed vs predicted and residuals plot for all parameters
+
+Prepare method to include additional measurments for chlfa and Kd (from MWTL)
+
+Test all code with real data. 
+
+Datasets can be found here:
+
+
