@@ -18,7 +18,7 @@ cfg <- list(
   input_path = "pelagicproduction\\calc_daily_pp\\input",
   file_pp   = "pp_wide.csv",
   # file_knmi = "knmi_daily.csv",
-  par_knmi = "daily_par.csv",
+  par_knmi = "data\\KNMI\\meteo\\dailyPAR.csv",
   out_dir   = "output_latest",
   fig_dir   = "output_latest/fig",
   
@@ -66,7 +66,7 @@ daylength_hours <- function(date, lat_deg = cfg$lat_deg) {
   2 * omega0 / (2*pi) * 24
 }
 
-knmi_par <- read_delim(file.path(cfg$input_path, cfg$par_knmi), delim = ",")
+knmi_par <- read_delim(file.path(cfg$par_knmi), delim = ";")
 
 # Conversion refs: bigleaf::Rg.to.PPFD (frac_PAR, 4.6 µmol J^-1).  # [4](https://search.r-project.org/CRAN/refmans/bigleaf/html/Rg.to.PPFD.html)[5](https://rdrr.io/cran/bigleaf/man/Rg.to.PPFD.html)
 
@@ -287,8 +287,8 @@ make_predictions <- function(models_list,
   # irradiance driver (E0) + daylight hours for integration
   E_df <- knmi_par_df %>%
     transmute(
-      datum,
-      hours_day = daylength_hours(datum),
+      date,
+      hours_day,
       E0 = if (use_daylight_mean) {
         dplyr::coalesce(PPFD_daylight, PPFD_24h)
       } else {
@@ -336,6 +336,12 @@ make_predictions <- function(models_list,
       mutate(Chl = coalesce(chl_alt, Chl)) %>%
       select(-chl_alt)
   }
+  
+  # diagnostics
+  cat(names(pars_wide))
+  
+  
+  
   
   # join E0 (PAR at surface), depth, compute depth-integrated PP
   pars_wide %>%
