@@ -206,6 +206,18 @@ length(comps); head(comps)
 
 ```{r fit, warning=FALSE}
 
+pred_dates <- tibble(
+  date = seq.Date(
+    as.Date("1990-01-01"),
+    as.Date("2024-12-31"),
+    by = "day"
+  )
+)
+
+# Different bloom centers based on measurement analysis
+p$stm_bloom1_center <- 75 # 117
+p$stm_bloom2_center <- 95 # 190
+
 dirs <- c(p$out_dir_lm, p$out_dir_gam, p$out_dir_stm)
 sapply(dirs, dir.create)
 
@@ -213,7 +225,7 @@ fits <- map(comps, function(cp){
   d <- filter(pp_all, compartment == cp)
   list(
     lm  = fit_model_tidy_realcols(d, model = 'lm'),
-    # gam = fit_model_tidy_realcols(d, model = 'gam'),
+    gam = fit_model_tidy_realcols(d, model = 'gam'),
     stm = fit_model_tidy_realcols(d, model = 'stm', stm_cfg = list(
       fourier_K = p$stm_fourier_K,
       bloom1_center = p$stm_bloom1_center,
@@ -230,10 +242,12 @@ names(fits) <- comps
 # 5. Dagelijkse PP voorspellen (EP + integratie)
 
 ```{r predict}
+
+
 preds <- imap(fits, function(fit_list, cp){
   list(
     lm  = make_predictions_realcols(fit_list$lm,  irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_lm,  dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
-    # gam = make_predictions_realcols(fit_list$gam, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_gam, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
+    gam = make_predictions_realcols(fit_list$gam, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_gam, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
     stm = make_predictions_realcols(fit_list$stm, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_stm, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth)
   )
 })
@@ -244,24 +258,81 @@ preds <- imap(fits, function(fit_list, cp){
 ## 6.1 Tijdreeks PP (model vs observaties)
 
 ```{r pp-ts, fig.width=9, fig.height=10}
-plot_pp_timeseries <- function(pred_df, obs_df, compartment){
-  obs_sel <- obs_df %>% filter(compartment == !!compartment)
-  pred_df %>% left_join(obs_sel, by = c('date','compartment')) %>%
-    ggplot(aes(date)) +
-    geom_line(aes(y = PP_model, colour='Model')) +
-    geom_point(aes(y = PP_observed, colour='Observed'), alpha=0.6) +
-    scale_colour_manual(values=c('Model'='#1f77b4','Observed'='#d62728')) +
-    labs(y='Depth-integrated PP (mg C m^-2 d^-1)', colour='') +
-    ggtitle(paste('Compartment:', compartment)) +
+
+# plot_pp_timeseries <- function(pred_df, obs_df, compartment){
+#   obs_sel <- obs_df %>% filter(compartment == !!compartment) %>%
+#   mutate(compartment = as.character(compartment))
+#   pred_df %>% left_join(obs_sel, by = c('date','compartment')) %>%
+#     ggplot(aes(date)) +
+#     geom_line(aes(y = PP_model, colour='Model')) +
+#     geom_point(aes(y = PP_observed, colour='Observed'), alpha=0.6) +
+#     scale_colour_manual(values=c('Model'='#1f77b4','Observed'='#d62728')) +
+#     labs(y='Depth-integrated PP (mg C m^-2 d^-1)', colour='') +
+#     ggtitle(paste('Compartment:', compartment)) +
+#     theme_minimal()
+# }
+
+plot_pp_timeseries <- function(pred_df, obs_df, cp){
+
+  obs_sel <- obs_df %>%
+    mutate(compartment = as.character(compartment)) %>%
+    filter(compartment == as.character(cp), !is.na(PP_observed))
+
+  ggplot() +
+    geom_line(
+      data = pred_df,
+      aes(date, PP_model, colour = "Model")
+    ) +
+    geom_point(
+      data = obs_sel,
+      aes(date, PP_observed, colour = "Observed"),
+      alpha = 0.6
+    ) +
+    scale_colour_manual(
+      values = c(Model = "#1f77b4", Observed = "#d62728")
+    ) +
+    coord_cartesian(ylim = c(0, 40000)) +
+    labs(
+      title = paste("Compartment:", cp),
+      y = "Depth-integrated PP (mg C m^-2 d^-1)",
+      colour = NULL
+    ) +
     theme_minimal()
 }
 
-example_cp <- as.numeric(comps[1])
+#example_cp <- as.numeric(comps[7])
+
+i <- 2
+example_cp <- comps[i]
+
 pp_ts_lm  <- plot_pp_timeseries(preds[[example_cp]]$lm,  obs, example_cp)
-# pp_ts_gam <- plot_pp_timeseries(preds[[example_cp]]$gam, obs, example_cp)
+pp_ts_gam <- plot_pp_timeseries(preds[[example_cp]]$gam, obs, example_cp)
 pp_ts_stm <- plot_pp_timeseries(preds[[example_cp]]$stm, obs, example_cp)
-pp_ts_lm  / pp_ts_stm
+pp_ts_lm  / pp_ts_gam  / pp_ts_stm
 ```
+
+```{r}
+get_r2 <- function(pred_df, obs_df, cp){
+
+  obs_sel <- obs_df %>%
+    mutate(compartment = as.character(compartment)) %>%
+    filter(compartment == as.character(cp),
+           !is.na(PP_observed))
+
+  df <- inner_join(
+    obs_sel,
+    pred_df,
+    by = "date"
+  )
+
+  cor(df$PP_observed, df$PP_model)^2
+}
+
+get_r2(preds[[example_cp]]$lm, obs, example_cp)
+get_r2(preds[[example_cp]]$gam, obs, example_cp)
+get_r2(preds[[example_cp]]$stm, obs, example_cp)
+```
+
 
 ## 6.2 Parameterreeksen
 
@@ -274,7 +345,8 @@ plot_parameters <- function(fitted_obj, compartment){
     facet_wrap(~parameter, scales='free_y', ncol=2) +
     labs(title=paste('Parameter estimates -', compartment), y=NULL, x=NULL)
 }
-plot_parameters(fits[[example_cp]]$gam, example_cp)
+#plot_parameters(fits[[example_cp]]$gam, example_cp)
+plot_parameters(fits[[example_cp]]$stm, example_cp)
 ```
 
 ## 6.3 GAM componenten (lange termijn vs seizoens)
@@ -286,7 +358,27 @@ plot_gam_components_realcols(fits[[example_cp]]$gam, param='PBmax')
 ## 6.4 STM SHAP (lange termijn / seizoens / spring bloom)
 
 ```{r shap, fig.width=9, fig.height=5}
-shap_df <- compute_stm_shap_realcols(fits[[example_cp]]$stm, parameter='PBmax')
+i <- 1
+example_cp <- comps[i]
+
+# shap_df <- compute_stm_shap_realcols(fits[[example_cp]]$stm, parameter='PBmax')
+# plot_stm_shap(shap_df)
+
+# Copy STM object
+stm_shap <- fits[[example_cp]]$stm
+
+# Keep only complete rows
+stm_shap$data <- stm_shap$data %>%
+  dplyr::filter(
+    complete.cases(PBmax, alpha, Eopt, Kd, chl_surface)
+  )
+
+# Compute SHAP
+shap_df <- compute_stm_shap_realcols(
+  stm_shap,
+  parameter = "PBmax"
+)
+
 plot_stm_shap(shap_df)
 ```
 
@@ -297,6 +389,132 @@ plot_param_diagnostics_generic_realcols(fits[[example_cp]]$lm,  original_df = fi
 plot_param_diagnostics_generic_realcols(fits[[example_cp]]$gam, original_df = filter(pp_all, compartment==example_cp), title_suffix='GAM')
 plot_param_diagnostics_generic_realcols(fits[[example_cp]]$stm, original_df = filter(pp_all, compartment==example_cp), title_suffix='STM')
 ```
+```{r}
+params_pred <- fits[[example_cp]]$stm$params
+
+original <- filter(pp_all, compartment == example_cp) %>%
+  select(date, PBmax, alpha, Eopt, Kd, chl_surface)
+
+df <- left_join(
+  original,
+  params_pred,
+  by = "date",
+  suffix = c(".obs", ".fit")
+)
+
+vars <- c("PBmax","alpha","Eopt","Kd","chl_surface")
+
+r2_table <- purrr::map_dfr(vars, function(v){
+
+  tibble(
+    parameter = v,
+    R2 = cor(
+      df[[paste0(v, ".obs")]],
+      df[[paste0(v, ".fit")]],
+      use = "complete.obs"
+    )^2
+  )
+
+})
+
+r2_table
+```
+```{r}
+# ============================================================
+# PP fit for STM with new bloom times
+# ============================================================
+
+pp_fit_new_peaks <- map_dfr(names(preds), function(cp) {
+
+  # Monthly observed PP
+  obs_monthly <- obs %>%
+    mutate(
+      date = as.Date(date),
+      compartment = as.character(compartment),
+      year = year(date),
+      month = month(date)
+    ) %>%
+    filter(
+      compartment == as.character(cp),
+      !is.na(PP_observed)
+    ) %>%
+    group_by(
+      compartment,
+      year,
+      month
+    ) %>%
+    summarise(
+      PP_observed = mean(PP_observed, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  # Monthly STM predictions using the new bloom times
+  pred_monthly <- preds[[cp]]$stm %>%
+    mutate(
+      date = as.Date(date),
+      compartment = as.character(compartment),
+      year = year(date),
+      month = month(date)
+    ) %>%
+    filter(
+      compartment == as.character(cp),
+      !is.na(PP_model)
+    ) %>%
+    group_by(
+      compartment,
+      year,
+      month
+    ) %>%
+    summarise(
+      PP_model = mean(PP_model, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  # Keep only months with both observed and predicted PP
+  matched <- inner_join(
+    obs_monthly,
+    pred_monthly,
+    by = c(
+      "compartment",
+      "year",
+      "month"
+    )
+  ) %>%
+    filter(
+      is.finite(PP_observed),
+      is.finite(PP_model)
+    )
+
+  # Calculate PP fit
+  tibble(
+    compartment = as.character(cp),
+
+    R2 = yardstick::rsq_vec(
+      truth = matched$PP_observed,
+      estimate = matched$PP_model,
+      na_rm = TRUE
+    ),
+
+    RMSE = yardstick::rmse_vec(
+      truth = matched$PP_observed,
+      estimate = matched$PP_model,
+      na_rm = TRUE
+    ),
+
+    MAE = yardstick::mae_vec(
+      truth = matched$PP_observed,
+      estimate = matched$PP_model,
+      na_rm = TRUE
+    ),
+
+    n = nrow(matched)
+  )
+})
+
+pp_fit_new_peaks
+```
+
+
 
 ## 6.6 Vergelijk PP tussen modellen
 
@@ -306,6 +524,179 @@ plot_param_diagnostics_generic_realcols(fits[[example_cp]]$stm, original_df = fi
 example_cp <- comps[3]
 compare_pp_models_with_obs(preds[[example_cp]], example_cp, obs)
 ```
+## 6.7 Test STM model without blooms
+```{r}
+## Test: removing the bloom from the STM
+
+dirs <- c(p$out_dir_lm, p$out_dir_gam, p$out_dir_stm)
+sapply(dirs, dir.create)
+
+fits_nobloom <- map(comps, function(cp){
+  d <- filter(pp_all, compartment == cp)
+  list(
+    stm = fit_model_tidy_realcols_nobloom(d, model = 'stm', stm_cfg = list(
+      fourier_K = p$stm_fourier_K
+    ))
+  )
+})
+
+names(fits_nobloom) <- comps
+
+out_dir_stm_nobloom <- "output_stm_nobloom"
+dir.create(out_dir_stm_nobloom, showWarnings = FALSE)
+
+preds_nobloom <- imap(fits_nobloom, function(fit_list, cp){
+  list(
+#    lm  = make_predictions_realcols(fit_list$lm,  irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_lm,  dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
+#    gam = make_predictions_realcols(fit_list$gam, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_gam, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
+    stm = make_predictions_realcols(fit_list$stm, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_stm_nobloom, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth)
+  )
+})
+
+```
+
+```{r diagnostics, fig.width=12, fig.height=9}
+## 6.5 Observed vs Predicted & Residuen (alle parameters)
+
+#plot_param_diagnostics_generic_realcols(fits[[example_cp]]$lm,  original_df = filter(pp_all, compartment==example_cp), title_suffix='LM')
+#plot_param_diagnostics_generic_realcols(fits[[example_cp]]$gam, original_df = filter(pp_all, compartment==example_cp), title_suffix='GAM')
+plot_param_diagnostics_generic_realcols(fits_nobloom[[example_cp]]$stm, original_df = filter(pp_all, compartment==example_cp), title_suffix='STM')
+```
+
+
+```{r}
+## Comparison statistics
+
+vars <- c("PBmax", "alpha", "Eopt", "Kd", "chl_surface")
+
+r2_all <- map_dfr(comps, function(cp) {
+
+  map_dfr(vars, function(v) {
+
+    obs_fit <- filter(pp_all, compartment == cp) %>%
+      select(date, obs = all_of(v)) %>%
+      left_join(
+        fits[[cp]]$stm$params %>%
+          select(date, fit = all_of(v)),
+        by = "date"
+      )
+
+    obs_fit_nobloom <- filter(pp_all, compartment == cp) %>%
+      select(date, obs = all_of(v)) %>%
+      left_join(
+        fits_nobloom[[cp]]$stm$params %>%
+          select(date, fit = all_of(v)),
+        by = "date"
+      )
+
+    tibble(
+      compartment = cp,
+      parameter = v,
+      R2_bloom = cor(obs_fit$obs, obs_fit$fit,
+                     use = "complete.obs")^2,
+      R2_nobloom = cor(obs_fit_nobloom$obs, obs_fit_nobloom$fit,
+                       use = "complete.obs")^2
+    )
+  })
+})
+
+r2_all
+
+
+pp_r2_all <- map_dfr(names(preds), function(cp) {
+
+  # STM with blooms
+  bloom_data <- preds[[cp]]$stm %>%
+    mutate(compartment = as.character(compartment)) %>%
+    inner_join(
+      obs %>%
+        mutate(compartment = as.character(compartment)),
+      by = c("date", "compartment")
+    ) %>%
+    filter(
+      !is.na(PP_model),
+      !is.na(PP_observed)
+    )
+
+  # STM without blooms
+  nobloom_data <- preds_nobloom[[cp]]$stm %>%
+    mutate(compartment = as.character(compartment)) %>%
+    inner_join(
+      obs %>%
+        mutate(compartment = as.character(compartment)),
+      by = c("date", "compartment")
+    ) %>%
+    filter(
+      !is.na(PP_model),
+      !is.na(PP_observed)
+    )
+
+  tibble(
+    compartment = cp,
+    model = c("STM with blooms", "STM without blooms"),
+    R2 = c(
+      yardstick::rsq_vec(
+        truth = bloom_data$PP_observed,
+        estimate = bloom_data$PP_model
+      ),
+      yardstick::rsq_vec(
+        truth = nobloom_data$PP_observed,
+        estimate = nobloom_data$PP_model
+      )
+    ),
+    RMSE = c(
+      yardstick::rmse_vec(
+        truth = bloom_data$PP_observed,
+        estimate = bloom_data$PP_model
+      ),
+      yardstick::rmse_vec(
+        truth = nobloom_data$PP_observed,
+        estimate = nobloom_data$PP_model
+      )
+    ),
+    MAE = c(
+      yardstick::mae_vec(
+        truth = bloom_data$PP_observed,
+        estimate = bloom_data$PP_model
+      ),
+      yardstick::mae_vec(
+        truth = nobloom_data$PP_observed,
+        estimate = nobloom_data$PP_model
+      )
+    ),
+    n = c(
+      nrow(bloom_data),
+      nrow(nobloom_data)
+    )
+  )
+})
+
+pp_r2_all
+
+pp_r2_summary <- pp_r2_all %>%
+  group_by(model) %>%
+  summarise(
+    mean_R2 = mean(R2, na.rm = TRUE),
+    mean_RMSE = mean(RMSE, na.rm = TRUE),
+    mean_MAE = mean(MAE, na.rm = TRUE),
+    total_matched_observations = sum(n),
+    .groups = "drop"
+  )
+
+pp_r2_summary
+
+pp_r2_all %>%
+  select(compartment, model, R2) %>%
+  pivot_wider(
+    names_from = model,
+    values_from = R2
+  ) %>%
+  mutate(
+    difference = `STM with blooms` - `STM without blooms`
+  )
+
+```
+
 
 # 7. Reproduceerbaarheid & aannames
 
@@ -322,3 +713,267 @@ compare_pp_models_with_obs(preds[[example_cp]], example_cp, obs)
   citeturn12search30turn12search35
 - **GAM**: seizoenscomponent is **cyclisch** via `bs='cc'`.
   citeturn12search25turn12search29 \`\`\`
+  
+  
+# 8. Leave one year out for validation
+```{r}
+# ============================================================
+# Leave-one-year-out validation
+# Fit models while hiding all measurements from validation_year
+# ============================================================
+
+validation_year <- 2024
+
+parameters_to_model <- c(
+  "PBmax",
+  "alpha",
+  "Eopt",
+  "Kd",
+  "chl_surface"
+)
+
+# ------------------------------------------------------------
+# Store the real measurements from the validation year
+# ------------------------------------------------------------
+
+validation_truth <- pp_all %>%
+  mutate(
+    compartment = as.character(compartment),
+    date = as.Date(date)
+  ) %>%
+  filter(
+    year(date) == validation_year
+  ) %>%
+  select(
+    compartment,
+    date,
+    all_of(parameters_to_model)
+  )
+
+
+# ------------------------------------------------------------
+# Hide the validation-year measurements from the models
+# ------------------------------------------------------------
+
+pp_validation <- pp_all %>%
+  mutate(
+    compartment = as.character(compartment),
+    date = as.Date(date),
+    across(
+      all_of(parameters_to_model),
+      as.numeric
+    ),
+    across(
+      all_of(parameters_to_model),
+      ~ if_else(
+        year(date) == validation_year,
+        NA_real_,
+        .x
+      )
+    )
+  )
+
+
+# Confirm that all parameter measurements are hidden
+validation_check <- pp_validation %>%
+  filter(
+    year(date) == validation_year
+  ) %>%
+  summarise(
+    across(
+      all_of(parameters_to_model),
+      ~ all(is.na(.x))
+    )
+  )
+
+print(validation_check)
+
+
+# ------------------------------------------------------------
+# Fit validation models by compartment
+# ------------------------------------------------------------
+
+fits_validation <- purrr::map(
+  comps,
+  function(cp) {
+
+    d <- pp_validation %>%
+      filter(
+        compartment == as.character(cp)
+      )
+
+    list(
+      lm = fit_model_tidy_realcols(
+        df = d,
+        model = "lm"
+      ),
+
+      gam = fit_model_tidy_realcols(
+        df = d,
+        model = "gam"
+      ),
+
+      stm = fit_model_tidy_realcols(
+        df = d,
+        model = "stm",
+        stm_cfg = list(
+          fourier_K = p$stm_fourier_K,
+          bloom1_center = p$stm_bloom1_center,
+          bloom1_sigma = p$stm_bloom1_sigma,
+          bloom2_center = p$stm_bloom2_center,
+          bloom2_sigma = p$stm_bloom2_sigma
+        )
+      )
+    )
+  }
+)
+
+names(fits_validation) <- as.character(comps)
+```
+
+```{r predict}
+
+# Dagelijkse PP voorspellen (EP + integratie)
+
+preds_validation <- imap(fits_validation, function(fit_list, cp){
+  list(
+    lm  = make_predictions_realcols(fit_list$lm,  irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_lm,  dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
+    gam = make_predictions_realcols(fit_list$gam, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_gam, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
+    stm = make_predictions_realcols(fit_list$stm, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_stm, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth)
+  )
+})
+```
+
+```{r}
+# ============================================================
+# Plot validation-year PP and calculate model fit
+# ============================================================
+
+plot_pp_validation <- function(pred_df, obs_df, cp, model_name, validation_year){
+
+  pred_sel <- pred_df %>%
+    mutate(date = as.Date(date)) %>%
+    filter(year(date) == validation_year) %>%
+    select(date, PP_model)
+
+  obs_sel <- obs_df %>%
+    mutate(
+      date = as.Date(date),
+      compartment = as.character(compartment)
+    ) %>%
+    filter(
+      compartment == as.character(cp),
+      year(date) == validation_year,
+      !is.na(PP_observed)
+    ) %>%
+    group_by(date) %>%
+    summarise(
+      PP_observed = mean(PP_observed, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  # Match predictions and observations only for metric calculation
+  comparison <- inner_join(
+    pred_sel,
+    obs_sel,
+    by = "date"
+  ) %>%
+    filter(
+      is.finite(PP_model),
+      is.finite(PP_observed)
+    )
+
+  # Calculate validation metrics
+  metrics <- comparison %>%
+    summarise(
+      R2 = cor(PP_observed, PP_model)^2,
+      RMSE = sqrt(mean((PP_observed - PP_model)^2)),
+      MAE = mean(abs(PP_observed - PP_model)),
+      n = n()
+    )
+
+  metric_label <- paste0(
+    "R² = ", round(metrics$R2, 3),
+    "\nRMSE = ", round(metrics$RMSE, 1),
+    "\nMAE = ", round(metrics$MAE, 1),
+    "\nn = ", metrics$n
+  )
+
+  ggplot() +
+    geom_line(
+      data = pred_sel,
+      aes(date, PP_model, colour = "Model"),
+      linewidth = 0.7
+    ) +
+    geom_point(
+      data = obs_sel,
+      aes(date, PP_observed, colour = "Observed"),
+      alpha = 0.7,
+      size = 1.8
+    ) +
+    annotate(
+      "label",
+      x = min(pred_sel$date, na.rm = TRUE),
+      y = Inf,
+      label = metric_label,
+      hjust = 0,
+      vjust = 1.1,
+      size = 3.5
+    ) +
+    scale_colour_manual(
+      values = c(
+        Model = "#1f77b4",
+        Observed = "#d62728"
+      )
+    ) +
+    labs(
+      title = paste(
+        model_name,
+        "| Compartment",
+        cp,
+        "| Validation year",
+        validation_year
+      ),
+      x = NULL,
+      y = "Depth-integrated PP (mg C m^-2 d^-1)",
+      colour = NULL
+    ) +
+    theme_minimal()
+}
+
+# Select compartment
+example_cp <- as.character(comps[4])
+
+# Create validation plots
+pp_val_lm <- plot_pp_validation(
+  preds_validation[[example_cp]]$lm,
+  obs,
+  example_cp,
+  "LM",
+  validation_year
+)
+
+pp_val_gam <- plot_pp_validation(
+  preds_validation[[example_cp]]$gam,
+  obs,
+  example_cp,
+  "GAM",
+  validation_year
+)
+
+pp_val_stm <- plot_pp_validation(
+  preds_validation[[example_cp]]$stm,
+  obs,
+  example_cp,
+  "STM",
+  validation_year
+)
+
+# Combine plots
+#pp_val_lm / pp_val_gam / 
+pp_val_stm
+```
+
+
+
+
