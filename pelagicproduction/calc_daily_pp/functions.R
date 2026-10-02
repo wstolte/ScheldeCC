@@ -155,6 +155,156 @@ fit_model_tidy_realcols <- function(df, model = c('lm','gam','stm'), stm_cfg = l
     fits <- purrr::imap(wfs, ~ fit(.x, data = df))
     
     preds_list <- purrr::imap(fits, function(wf_fit, nm){
+      
+      observed <- df %>%
+        select(date, value = all_of(nm)) %>%
+        filter(!is.na(value))
+      
+      tibble(
+        date = pred_dates$date,
+        !!nm := zoo::na.approx(
+          object = observed$value,
+          x = as.numeric(observed$date),
+          xout = as.numeric(pred_dates$date),
+          na.rm = FALSE,
+          rule = 2
+        )
+      )
+    })
+    
+    params <- purrr::reduce(preds_list, left_join, by = "date") %>%
+      dplyr::arrange(date) %>%
+      dplyr::distinct(date, .keep_all = TRUE)
+    
+    return(list(type = "lm", workflows = fits, params = params, data = df))
+  }
+  
+  # ---------- GAM (één mgcv::gam per parameter) ----------
+  if (model == 'gam'){
+    
+    df_gam <- df %>%
+      dplyr::mutate(
+        date_num = as.numeric(date),
+        doy      = lubridate::yday(date)
+      )
+    
+    make_gam <- function(y) {
+      fml <- as.formula(
+        paste0('log(', y, ' + 1e-8) ~ s(date_num, bs="tp") + s(doy, bs="cc")')
+      )
+      mgcv::gam(fml, data = df_gam, method = "REML", na.action = na.exclude)
+    }
+    
+    gams <- purrr::map(param_cols, make_gam)
+    names(gams) <- param_cols
+    
+    pred_dates_gam <- pred_dates %>%
+      mutate(
+        date_num = as.numeric(date),
+        doy = lubridate::yday(date)
+      )
+    
+    preds_list <- purrr::imap(gams, function(gm, nm){
+      tibble::tibble(
+        date = pred_dates_gam$date,
+        !!nm := exp(
+          predict(
+            gm,
+            newdata = pred_dates_gam,
+            type = "response"
+          )
+        )
+      )
+    })
+    
+    params <- purrr::reduce(preds_list, dplyr::left_join, by = "date") %>%
+      dplyr::arrange(date) %>%
+      dplyr::distinct(date, .keep_all = TRUE)
+    
+    return(list(
+      type   = "gam",
+      gams   = gams,      # lijst met 5 mgcv::gam-objecten
+      params = params,
+      data   = df_gam     # bevat date_num en doy
+    ))
+  }
+  
+  # ---------- STM (Prophet via recipe; uitkomst log → skip bij bake) ----------
+  if (model == 'stm'){
+    K  <- stm_cfg$fourier_K  %||% 5
+    c1 <- stm_cfg$bloom1_center %||% 75
+    s1 <- stm_cfg$bloom1_sigma  %||% 10
+    c2 <- stm_cfg$bloom2_center %||% 95
+    s2 <- stm_cfg$bloom2_sigma  %||% 15
+    
+    build_wf <- function(y){
+      rec <- recipe(as.formula(paste(y, '~ date')), data = df) %>%
+        step_log(all_outcomes(), offset = 1e-8, skip = TRUE) %>%  # log-scale voor training, niet voor bake
+        step_timeseries_signature(date) %>%
+        step_rm(matches('(.iso$|.xts$|.wday.lbl$|.month.lbl$|.am.pm$)')) %>%
+        step_mutate(index_num = as.numeric(date)) %>%
+        step_fourier(date, K = K, period = 365.25) %>%
+        step_mutate(
+          bloom1 = exp(-0.5 * ((lubridate::yday(date) - c1)/s1)^2),
+          bloom2 = exp(-0.5 * ((lubridate::yday(date) - c2)/s2)^2)
+        ) %>%
+        step_zv(all_predictors())
+      
+      mod <- prophet_reg(
+        seasonality_yearly = TRUE,
+        seasonality_weekly = FALSE,
+        seasonality_daily  = FALSE
+      ) %>% set_engine('prophet')
+      
+      workflow() %>% add_recipe(rec) %>% add_model(mod)
+    }
+    
+    wfs  <- setNames(lapply(param_cols, build_wf), param_cols)
+    fits <- purrr::imap(wfs, ~ fit(.x, data = df))
+    
+    preds_list <- purrr::imap(fits, function(wf_fit, nm){
+      tibble(date = pred_dates$date, !!nm := exp(predict(wf_fit, new_data = pred_dates)$.pred))
+    })
+    
+    params <- purrr::reduce(preds_list, left_join, by = 'date') %>%
+      dplyr::arrange(date) %>%
+      dplyr::distinct(date, .keep_all = TRUE)
+    
+    return(list(type='stm', workflows=fits, params=params, data=df, stm_cfg=stm_cfg))
+  }
+}
+
+### Test removing blooms from STM model
+fit_model_tidy_realcols_nobloom <- function(df, model = c('lm','gam','stm'), stm_cfg = list()){
+  model <- match.arg(model)
+  
+  # sort → per dag reduceren
+  df <- df %>%
+    dplyr::arrange(date) %>%
+    collapse_daily_ts()
+  
+  req <- c('date','compartment','PBmax','alpha','Eopt','Kd','chl_surface')
+  stopifnot(all(req %in% names(df)))
+  param_cols <- c('PBmax','alpha','Eopt','Kd','chl_surface')
+  
+  # ---------- LM (lineaire interpolatie via recipe + zoo::na.approx) ----------
+  if (model == 'lm') {
+    
+    build_wf <- function(y){
+      rec <- recipe(as.formula(paste(y, "~ 1")), data = df) %>%
+        step_mutate(
+          !!rlang::ensym(y) := zoo::na.approx(!!rlang::ensym(y), na.rm = FALSE, rule = 2),
+          .pkgs = "zoo"
+        )
+      
+      mod <- null_model(mode = "regression") %>% set_engine("parsnip")
+      workflow() %>% add_recipe(rec) %>% add_model(mod)
+    }
+    
+    wfs  <- setNames(lapply(param_cols, build_wf), param_cols)
+    fits <- purrr::imap(wfs, ~ fit(.x, data = df))
+    
+    preds_list <- purrr::imap(fits, function(wf_fit, nm){
       rec <- workflows::extract_recipe(wf_fit)
       baked <- bake(rec, new_data = df)
       tibble(date = df$date, !!nm := baked[[nm]])
@@ -220,10 +370,10 @@ fit_model_tidy_realcols <- function(df, model = c('lm','gam','stm'), stm_cfg = l
         step_rm(matches('(.iso$|.xts$|.wday.lbl$|.month.lbl$|.am.pm$)')) %>%
         step_mutate(index_num = as.numeric(date)) %>%
         step_fourier(date, K = K, period = 365.25) %>%
-        step_mutate(
-          bloom1 = exp(-0.5 * ((lubridate::yday(date) - c1)/s1)^2),
-          bloom2 = exp(-0.5 * ((lubridate::yday(date) - c2)/s2)^2)
-        ) %>%
+        # step_mutate(
+        #   bloom1 = exp(-0.5 * ((lubridate::yday(date) - c1)/s1)^2),
+        #   bloom2 = exp(-0.5 * ((lubridate::yday(date) - c2)/s2)^2)
+        # ) %>%
         step_zv(all_predictors())
       
       mod <- prophet_reg(
@@ -239,7 +389,7 @@ fit_model_tidy_realcols <- function(df, model = c('lm','gam','stm'), stm_cfg = l
     fits <- purrr::imap(wfs, ~ fit(.x, data = df))
     
     preds_list <- purrr::imap(fits, function(wf_fit, nm){
-      tibble(date = df$date, !!nm := exp(predict(wf_fit, new_data = df)$.pred))
+      tibble(date = pred_dates$date, !!nm := exp(predict(wf_fit, new_data = pred_dates)$.pred))
     })
     
     params <- purrr::reduce(preds_list, left_join, by = 'date') %>%
@@ -249,7 +399,6 @@ fit_model_tidy_realcols <- function(df, model = c('lm','gam','stm'), stm_cfg = l
     return(list(type='stm', workflows=fits, params=params, data=df, stm_cfg=stm_cfg))
   }
 }
-
 
 # ================================
 # 4) Voorspellen + export (EP integratie) — join één-op-één
@@ -392,7 +541,8 @@ compute_stm_shap_realcols <- function(stm_obj, parameter = 'PBmax'){
   idx <- unique(floor(seq(1, nS, length.out = k)))  # gelijkmatig verdeeld in de tijd
   
   # 6) Feature-naam-groepen (Fourier -> seasonal; bloom1/2 -> spring_bloom; rest -> long_term)
-  seasonal_cols <- names(x_mat_iml)[grepl('fourier', names(x_mat_iml))]
+  #seasonal_cols <- names(x_mat_iml)[grepl('fourier', names(x_mat_iml))]
+  seasonal_cols <- names(x_mat_iml)[grepl("^date_(sin|cos)", names(x_mat_iml))]
   bloom_cols    <- c('bloom1','bloom2')
   
   # 7) SHAP per rij (datum), direct de juiste datum eraan hangen
@@ -439,29 +589,258 @@ compare_pp_models_with_obs <- function(pred_list, comp_id, obs_df){
     filter(compartment == as.character(comp_id)) %>%
     select(date, PP_observed) %>%
     # filter(year(date) < 2015)
-  
-  # Modelvoorspellingen (LM/GAM/STM) binden en linken aan observaties per date
-  p_all <- bind_rows(
-    pred_list$lm  %>% mutate(model = "LM"),
-    pred_list$gam %>% mutate(model = "GAM"),
-    pred_list$stm %>% mutate(model = "STM")
-  ) %>%
-    mutate(compartment = as.character(compartment)) %>%
-    filter(compartment == as.character(comp_id)) %>%
-    full_join(obs2, by = "date")
-  
-  ggplot(p_all, aes(x = date, y = PP_model, colour = model)) +
-    geom_line(size = 1) +
-    # Observaties: zwarte punten
-    geom_point(aes(x = date, y = PP_observed),
-               inherit.aes = FALSE, colour = "black", alpha = 0.85, size = 1.8) +
-    scale_colour_manual(values = c(LM = "#1f77b4", GAM = "#2ca02c", STM = "#ff7f0e")) +
-    labs(
-      title = paste("PP vergelijking (lijnen) + Observaties (zwarte punten) —", comp_id),
-      y = "Depth-integrated PP (mg C m^-2 d^-1)",
-      colour = "Model",
-      caption = "Zwarte punten = PP_observed"
-    ) +
-    theme_minimal()
+    
+    # Modelvoorspellingen (LM/GAM/STM) binden en linken aan observaties per date
+    p_all <- bind_rows(
+      pred_list$lm  %>% mutate(model = "LM"),
+      pred_list$gam %>% mutate(model = "GAM"),
+      pred_list$stm %>% mutate(model = "STM")
+    ) %>%
+      mutate(compartment = as.character(compartment)) %>%
+      filter(compartment == as.character(comp_id)) %>%
+      full_join(obs2, by = "date")
+    
+    ggplot(p_all, aes(x = date, y = PP_model, colour = model)) +
+      geom_line(size = 1) +
+      # Observaties: zwarte punten
+      geom_point(aes(x = date, y = PP_observed),
+                 inherit.aes = FALSE, colour = "black", alpha = 0.85, size = 1.8) +
+      scale_colour_manual(values = c(LM = "#1f77b4", GAM = "#2ca02c", STM = "#ff7f0e")) +
+      labs(
+        title = paste("PP vergelijking (lijnen) + Observaties (zwarte punten) —", comp_id),
+        y = "Depth-integrated PP (mg C m^-2 d^-1)",
+        colour = "Model",
+        caption = "Zwarte punten = PP_observed"
+      ) +
+      theme_minimal()
 }
 
+## Use kd and chl from measurements
+prepare_measured_kd_chl <- function(
+    measured_df,
+    model_dates,
+    compartment_id,
+    log_interpolate = FALSE,
+    log_offset = 1e-8
+) {
+  
+  # Extract measured values for this compartment
+  measured_daily <- measured_df %>%
+    mutate(
+      compartment = as.character(compartment),
+      date = as.Date(date),
+      Kd = as.numeric(Kd),
+      chl_surface = as.numeric(chl_surface)
+    ) %>%
+    filter(
+      compartment == as.character(compartment_id)
+    ) %>%
+    group_by(date) %>%
+    summarise(
+      Kd_observed = if (
+        all(is.na(Kd))
+      ) {
+        NA_real_
+      } else {
+        mean(Kd, na.rm = TRUE)
+      },
+      
+      chl_observed = if (
+        all(is.na(chl_surface))
+      ) {
+        NA_real_
+      } else {
+        mean(chl_surface, na.rm = TRUE)
+      },
+      
+      .groups = "drop"
+    )
+  
+  # Log transformation requires non-negative measurements
+  if (
+    any(measured_daily$Kd_observed < 0, na.rm = TRUE) ||
+    any(measured_daily$chl_observed < 0, na.rm = TRUE)
+  ) {
+    stop(
+      "Negative Kd or chlorophyll values found. ",
+      "Log interpolation cannot be applied."
+    )
+  }
+  
+  environmental_inputs <- tibble(
+    date = as.Date(model_dates)
+  ) %>%
+    distinct(date) %>%
+    arrange(date) %>%
+    left_join(
+      measured_daily,
+      by = "date"
+    )
+  
+  if (log_interpolate) {
+    
+    environmental_inputs <- environmental_inputs %>%
+      mutate(
+        # Interpolate transformed measurements, then return
+        # to the original physical units
+        Kd = exp(
+          zoo::na.approx(
+            log(Kd_observed + log_offset),
+            x = as.numeric(date),
+            na.rm = FALSE,
+            rule = 2
+          )
+        ) - log_offset,
+        
+        chl_surface = exp(
+          zoo::na.approx(
+            log(chl_observed + log_offset),
+            x = as.numeric(date),
+            na.rm = FALSE,
+            rule = 2
+          )
+        ) - log_offset,
+        
+        interpolation_method = "log scale"
+      )
+    
+  } else {
+    
+    environmental_inputs <- environmental_inputs %>%
+      mutate(
+        # Existing interpolation on the original scale
+        Kd = zoo::na.approx(
+          Kd_observed,
+          x = as.numeric(date),
+          na.rm = FALSE,
+          rule = 2
+        ),
+        
+        chl_surface = zoo::na.approx(
+          chl_observed,
+          x = as.numeric(date),
+          na.rm = FALSE,
+          rule = 2
+        ),
+        
+        interpolation_method = "original scale"
+      )
+  }
+  
+  environmental_inputs %>%
+    mutate(
+      Kd_source = case_when(
+        !is.na(Kd_observed) ~ "observed",
+        !is.na(Kd) ~ "interpolated",
+        TRUE ~ "missing"
+      ),
+      
+      chl_source = case_when(
+        !is.na(chl_observed) ~ "observed",
+        !is.na(chl_surface) ~ "interpolated",
+        TRUE ~ "missing"
+      )
+    )
+}
+
+
+calc_pp_r2 <- function(
+    pred_bloom,
+    pred_nobloom,
+    obs_df,
+    compartment_id
+) {
+  
+  # Observed monthly PP
+  obs_monthly <- obs_df %>%
+    mutate(
+      compartment = as.character(compartment),
+      year = year(date),
+      month = month(date)
+    ) %>%
+    filter(
+      compartment == as.character(compartment_id),
+      !is.na(PP_observed)
+    ) %>%
+    group_by(compartment, year, month) %>%
+    summarise(
+      PP_observed = mean(PP_observed, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Daily predictions converted to monthly means
+  pred_bloom_monthly <- pred_bloom %>%
+    mutate(
+      compartment = as.character(compartment),
+      year = year(date),
+      month = month(date)
+    ) %>%
+    filter(compartment == as.character(compartment_id)) %>%
+    group_by(compartment, year, month) %>%
+    summarise(
+      PP_model = mean(PP_model, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    inner_join(
+      obs_monthly,
+      by = c("compartment", "year", "month")
+    )
+  
+  pred_nobloom_monthly <- pred_nobloom %>%
+    mutate(
+      compartment = as.character(compartment),
+      year = year(date),
+      month = month(date)
+    ) %>%
+    filter(compartment == as.character(compartment_id)) %>%
+    group_by(compartment, year, month) %>%
+    summarise(
+      PP_model = mean(PP_model, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    inner_join(
+      obs_monthly,
+      by = c("compartment", "year", "month")
+    )
+  
+  bind_rows(
+    tibble(
+      model = "STM with blooms",
+      R2 = yardstick::rsq_vec(
+        truth = pred_bloom_monthly$PP_observed,
+        estimate = pred_bloom_monthly$PP_model,
+        na_rm = TRUE
+      ),
+      RMSE = yardstick::rmse_vec(
+        truth = pred_bloom_monthly$PP_observed,
+        estimate = pred_bloom_monthly$PP_model,
+        na_rm = TRUE
+      ),
+      MAE = yardstick::mae_vec(
+        truth = pred_bloom_monthly$PP_observed,
+        estimate = pred_bloom_monthly$PP_model,
+        na_rm = TRUE
+      ),
+      n = nrow(pred_bloom_monthly)
+    ),
+    tibble(
+      model = "STM without blooms",
+      R2 = yardstick::rsq_vec(
+        truth = pred_nobloom_monthly$PP_observed,
+        estimate = pred_nobloom_monthly$PP_model,
+        na_rm = TRUE
+      ),
+      RMSE = yardstick::rmse_vec(
+        truth = pred_nobloom_monthly$PP_observed,
+        estimate = pred_nobloom_monthly$PP_model,
+        na_rm = TRUE
+      ),
+      MAE = yardstick::mae_vec(
+        truth = pred_nobloom_monthly$PP_observed,
+        estimate = pred_nobloom_monthly$PP_model,
+        na_rm = TRUE
+      ),
+      n = nrow(pred_nobloom_monthly)
+    )
+  )
+}
