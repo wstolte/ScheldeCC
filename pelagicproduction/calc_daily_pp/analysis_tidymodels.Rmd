@@ -3,7 +3,7 @@ title: "Primary Production with Consistent Tidymodels Workflows (Fixed Columns)"
 output: html_document
 params:
   input_path: "input"
-  files_pp_wide: "pp_wide.csv"
+  files_pp_wide: "pp_wide_longer_time_series.csv"
   files_knmi_daily: "../../data/KNMI/meteo/dailymeteo.csv"
   files_daily_par: "daily_par.csv"
   files_pp_obs: "../../data/Deltares/combined_ppp/monthly_mean_integrated_ppp.csv"
@@ -179,8 +179,12 @@ knmi <- dir_knmi %>%
 # calculation done in preparation script (but format differs)
 # knmi <- read_csv(file.path(p$input_path, p$files_daily_par))
 
+# ============================================================
+# Observations aggregated by month (current workflow)
+# ============================================================
+
 # Observaties (PP)
-obs <- read_delim(p$files_pp_obs, show_col_types = FALSE, delim = ";") %>%
+obs_monthly <- read_delim(p$files_pp_obs, show_col_types = FALSE, delim = ";") %>%
   mutate(date = as_date(as_date(paste(year, month, "15")))) %>%
   rename(
     PP_observed = monthlyMean,
@@ -188,6 +192,31 @@ obs <- read_delim(p$files_pp_obs, show_col_types = FALSE, delim = ";") %>%
   ) %>%
   # mutate(compartment = as.character(compartiment)) %>%
   select(date, compartment, PP_observed)
+
+
+# ============================================================
+# Use observations on exact dates (new workflow)
+# ============================================================
+
+obs_exact <- read_delim(
+  "../../data/Deltares/combined_ppp/pp_integrated_exact_dates.csv",
+  show_col_types = FALSE,
+  delim = ";"
+) %>%
+  rename(
+    compartment = compartiment
+  ) %>%
+  mutate(
+    date = as.Date(date),
+    compartment = as.character(compartment)
+  ) %>%
+  select(date, compartment, PP_observed)
+
+# ============================================================
+# Choose which one to use
+# ============================================================
+
+obs <- obs_exact
 
 # Fallback PAR uit pp_wide (irradiance_J_cm2)
 par_pp <- compute_incident_PAR_from_pp(pp, f_par = p$f_par, umol_per_J = p$umol_per_J)  # date + PAR_pp
@@ -197,6 +226,10 @@ PAR <- prefer_knmi_PAR(knmi, par_pp)
 
 # Merge voor modellering
 pp_all <- pp %>% left_join(PAR, by = 'date') %>% arrange(compartment, date)
+
+# Replace alpha outliers (values > 0.05) with NA
+pp_all <- pp_all %>%
+  mutate(alpha = if_else(alpha > 0.05, NA_real_, alpha))
 
 comps <- unique(pp_all$compartment)
 length(comps); head(comps)
@@ -242,7 +275,6 @@ names(fits) <- comps
 # 5. Dagelijkse PP voorspellen (EP + integratie)
 
 ```{r predict}
-
 
 preds <- imap(fits, function(fit_list, cp){
   list(
@@ -291,7 +323,7 @@ plot_pp_timeseries <- function(pred_df, obs_df, cp){
     scale_colour_manual(
       values = c(Model = "#1f77b4", Observed = "#d62728")
     ) +
-    coord_cartesian(ylim = c(0, 40000)) +
+    coord_cartesian(ylim = c(0, 5500)) +
     labs(
       title = paste("Compartment:", cp),
       y = "Depth-integrated PP (mg C m^-2 d^-1)",
@@ -302,7 +334,7 @@ plot_pp_timeseries <- function(pred_df, obs_df, cp){
 
 #example_cp <- as.numeric(comps[7])
 
-i <- 2
+i <- 7
 example_cp <- comps[i]
 
 pp_ts_lm  <- plot_pp_timeseries(preds[[example_cp]]$lm,  obs, example_cp)
@@ -345,6 +377,10 @@ plot_parameters <- function(fitted_obj, compartment){
     facet_wrap(~parameter, scales='free_y', ncol=2) +
     labs(title=paste('Parameter estimates -', compartment), y=NULL, x=NULL)
 }
+
+i <- 7
+example_cp <- comps[i]
+
 #plot_parameters(fits[[example_cp]]$gam, example_cp)
 plot_parameters(fits[[example_cp]]$stm, example_cp)
 ```
@@ -358,7 +394,7 @@ plot_gam_components_realcols(fits[[example_cp]]$gam, param='PBmax')
 ## 6.4 STM SHAP (lange termijn / seizoens / spring bloom)
 
 ```{r shap, fig.width=9, fig.height=5}
-i <- 1
+i <- 7
 example_cp <- comps[i]
 
 # shap_df <- compute_stm_shap_realcols(fits[[example_cp]]$stm, parameter='PBmax')
@@ -382,6 +418,556 @@ shap_df <- compute_stm_shap_realcols(
 plot_stm_shap(shap_df)
 ```
 
+## 6.4a STM contribution of different components (model only)
+```{r}
+
+# ============================================================
+# DAILY STM COMPONENTS
+# All compartments × all parameters = 35 plots
+# ============================================================
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(workflows)
+library(recipes)
+library(readr)
+
+# ============================================================
+# 1. Settings
+# ============================================================
+
+compartments_to_plot <- names(fits)
+
+parameters_to_plot <- c(
+  "PBmax",
+  "alpha",
+  "Eopt",
+  "Kd",
+  "chl_surface"
+)
+
+# Folder for plots and extracted component data
+component_output_dir <- "stm_component_plots"
+
+dir.create(
+  component_output_dir,
+  showWarnings = FALSE
+)
+
+# ============================================================
+# 2. Function to extract components for one combination
+# ============================================================
+
+extract_daily_stm_components <- function(
+    fits,
+    compartment_selected,
+    parameter_selected
+) {
+
+  message(
+    "Extracting compartment ",
+    compartment_selected,
+    ", parameter ",
+    parameter_selected
+  )
+
+  # ----------------------------------------------------------
+  # Extract fitted workflow
+  # ----------------------------------------------------------
+
+  wf <- fits[[compartment_selected]]$
+    stm$
+    workflows[[parameter_selected]]
+
+  # Modeltime Prophet wrapper
+  prophet_model <- workflows::extract_fit_engine(wf)
+
+  # Native Prophet model
+  prophet_native <- prophet_model$models$model_1
+
+  # ----------------------------------------------------------
+  # Full daily sequence already used by the STM
+  # ----------------------------------------------------------
+
+  daily_dates <- fits[[compartment_selected]]$
+    stm$
+    params %>%
+    select(date) %>%
+    distinct() %>%
+    arrange(date)
+
+  # ----------------------------------------------------------
+  # First recipe:
+  # create time signatures, Fourier terms and bloom terms
+  # ----------------------------------------------------------
+
+  workflow_recipe <- workflows::extract_recipe(
+    wf,
+    estimated = TRUE
+  )
+
+  daily_engineered <- recipes::bake(
+    workflow_recipe,
+    new_data = daily_dates
+  )
+
+  # ----------------------------------------------------------
+  # Second recipe:
+  # prepare engineered variables for native Prophet
+  # ----------------------------------------------------------
+
+  xreg_recipe <- prophet_model$extras$xreg_recipe
+
+  daily_xreg <- recipes::bake(
+    xreg_recipe,
+    new_data = daily_engineered
+  )
+
+  # ----------------------------------------------------------
+  # Prepare native Prophet input
+  # ----------------------------------------------------------
+
+  daily_prophet_data <- daily_xreg %>%
+    mutate(
+      ds = daily_dates$date,
+      .before = 1
+    )
+
+  # Match Prophet's internal column naming:
+  # dots become underscores and names become lowercase
+  names(daily_prophet_data) <- names(daily_prophet_data) %>%
+    gsub("\\.", "_", .) %>%
+    tolower()
+
+  required_regressors <- names(
+    prophet_native$extra_regressors
+  )
+
+  missing_regressors <- setdiff(
+    required_regressors,
+    names(daily_prophet_data)
+  )
+
+  if (length(missing_regressors) > 0) {
+
+    stop(
+      paste0(
+        "Missing regressors for compartment ",
+        compartment_selected,
+        ", parameter ",
+        parameter_selected,
+        ": ",
+        paste(
+          missing_regressors,
+          collapse = ", "
+        )
+      )
+    )
+  }
+
+  daily_prophet_data <- daily_prophet_data %>%
+    select(
+      ds,
+      all_of(required_regressors)
+    )
+
+  # ----------------------------------------------------------
+  # Predict components on all daily dates
+  # ----------------------------------------------------------
+
+  component_predictions <- predict(
+    prophet_native,
+    daily_prophet_data
+  )
+
+  # ----------------------------------------------------------
+  # Find manual Fourier contributions
+  # ----------------------------------------------------------
+
+  fourier_cols <- names(component_predictions)[
+    grepl(
+      "^date_(sin|cos)365_25_k[1-5]$",
+      names(component_predictions),
+      ignore.case = TRUE
+    )
+  ]
+
+  if (length(fourier_cols) != 10) {
+
+    warning(
+      paste0(
+        "Expected 10 Fourier columns but found ",
+        length(fourier_cols),
+        " for compartment ",
+        compartment_selected,
+        ", parameter ",
+        parameter_selected
+      )
+    )
+  }
+
+  # ----------------------------------------------------------
+  # Calculate total seasonality
+  # ----------------------------------------------------------
+
+  component_predictions <- component_predictions %>%
+    mutate(
+      seasonality_fourier = rowSums(
+        across(all_of(fourier_cols)),
+        na.rm = TRUE
+      )
+    )
+
+  if ("yearly" %in% names(component_predictions)) {
+
+    component_predictions <- component_predictions %>%
+      mutate(
+        seasonality_prophet = yearly,
+
+        seasonality =
+          seasonality_fourier +
+          seasonality_prophet
+      )
+
+  } else {
+
+    component_predictions <- component_predictions %>%
+      mutate(
+        seasonality_prophet = 0,
+        seasonality = seasonality_fourier
+      )
+  }
+
+  # ----------------------------------------------------------
+  # Return selected component data
+  # ----------------------------------------------------------
+
+  component_predictions %>%
+    transmute(
+      date = as.Date(ds),
+
+      compartment = as.character(
+        compartment_selected
+      ),
+
+      parameter = parameter_selected,
+
+      long_term_trend = trend,
+
+      seasonality_fourier,
+      seasonality_prophet,
+      seasonality,
+
+      bloom1,
+      bloom2,
+
+      fitted_log = yhat,
+      fitted_log_lower = yhat_lower,
+      fitted_log_upper = yhat_upper,
+      fitted_original_scale = exp(yhat),
+      fitted_original_lower = exp(yhat_lower),
+      fitted_original_upper = exp(yhat_upper)
+    )
+}
+
+# ============================================================
+# 3. Create all compartment-parameter combinations
+# ============================================================
+
+component_grid <- tidyr::crossing(
+  compartment = compartments_to_plot,
+  parameter = parameters_to_plot
+)
+
+component_grid
+
+# This should contain 35 rows
+nrow(component_grid)
+
+# ============================================================
+# 4. Extract the components for all 35 combinations
+# ============================================================
+
+all_stm_components <- purrr::map2_dfr(
+  component_grid$compartment,
+  component_grid$parameter,
+
+  function(compartment, parameter) {
+
+    extract_daily_stm_components(
+      fits = fits,
+      compartment_selected = compartment,
+      parameter_selected = parameter
+    )
+  }
+)
+
+# ============================================================
+# 5. Sanity checks
+# ============================================================
+
+# Number of compartment-parameter combinations
+all_stm_components %>%
+  distinct(compartment, parameter) %>%
+  nrow()
+
+# Expected: 35
+
+# Number of dates per combination
+component_counts <- all_stm_components %>%
+  count(
+    compartment,
+    parameter,
+    name = "n_dates"
+  )
+
+print(
+  component_counts,
+  n = Inf
+)
+
+# ============================================================
+# Convert to long format
+# ============================================================
+
+all_stm_components_long <- all_stm_components %>%
+  select(
+    date,
+    compartment,
+    parameter,
+    long_term_trend,
+    seasonality,
+    bloom1,
+    bloom2
+  ) %>%
+  pivot_longer(
+    cols = c(
+      long_term_trend,
+      seasonality,
+      bloom1,
+      bloom2
+    ),
+    names_to = "component",
+    values_to = "contribution"
+  )
+
+# ============================================================
+# Create 35 plots and save them
+# ============================================================
+
+for(comp in compartments_to_plot){
+
+  for(par in parameters_to_plot){
+
+    p <- all_stm_components_long %>%
+      filter(
+        compartment == comp,
+        parameter == par
+      ) %>%
+      ggplot(
+        aes(date, contribution)
+      ) +
+      geom_hline(
+        yintercept = 0,
+        colour = "grey70"
+      ) +
+      geom_line(
+        colour = "steelblue4",
+        linewidth = 0.5
+      ) +
+      facet_wrap(
+        ~ component,
+        scales = "free_y",
+        ncol = 1
+      ) +
+      theme_bw() +
+      labs(
+        title = paste(
+          "STM components",
+          par,
+          "- compartment",
+          comp
+        ),
+        x = NULL,
+        y = "Contribution"
+      )
+
+    ggsave(
+      filename = file.path(
+        component_output_dir,
+        paste0(
+          "STM_components_",
+          par,
+          "_compartment_",
+          comp,
+          ".png"
+        )
+      ),
+      plot = p,
+      width = 10,
+      height = 8,
+      dpi = 300
+    )
+
+  }
+}
+
+```
+
+## 6.4b Calculating a confidence interval around the yearly estimates
+
+```{r}
+pp_uncertainty_input <- all_stm_components %>%
+  filter(compartment == "1") %>%
+  select(
+    date,
+    parameter,
+    fitted_original_scale,
+    fitted_original_lower,
+    fitted_original_upper
+  ) %>%
+  pivot_wider(
+    names_from = parameter,
+    values_from = c(
+      fitted_original_scale,
+      fitted_original_lower,
+      fitted_original_upper
+    )
+  )
+
+pp_uncertainty_input <- pp_uncertainty_input %>%
+  left_join(
+    PAR %>%
+      select(date, PAR),
+    by = "date"
+  ) %>%
+  mutate(
+    bottomdepth = 10
+  )
+
+pp_uncertainty <- purrr::pmap_dfr(
+  pp_uncertainty_input,
+
+  function(
+    date,
+    fitted_original_scale_PBmax,
+    fitted_original_scale_alpha,
+    fitted_original_scale_Eopt,
+    fitted_original_scale_Kd,
+    fitted_original_scale_chl_surface,
+
+    fitted_original_lower_PBmax,
+    fitted_original_lower_alpha,
+    fitted_original_lower_Eopt,
+    fitted_original_lower_Kd,
+    fitted_original_lower_chl_surface,
+
+    fitted_original_upper_PBmax,
+    fitted_original_upper_alpha,
+    fitted_original_upper_Eopt,
+    fitted_original_upper_Kd,
+    fitted_original_upper_chl_surface,
+
+    PAR,
+    bottomdepth
+  ) {
+
+    pp_est <- compute_daily_PP_realcols(
+      date,
+      fitted_original_scale_PBmax,
+      fitted_original_scale_alpha,
+      fitted_original_scale_Eopt,
+      fitted_original_scale_Kd,
+      fitted_original_scale_chl_surface,
+      PAR,
+      bottomdepth = bottomdepth,
+      dz = 0.25,
+      hours = 24
+    )$PP_model[[1]]
+
+    pp_low <- compute_daily_PP_realcols(
+      date,
+      fitted_original_lower_PBmax,
+      fitted_original_lower_alpha,
+      fitted_original_lower_Eopt,
+      fitted_original_lower_Kd,
+      fitted_original_lower_chl_surface,
+      PAR,
+      bottomdepth = bottomdepth,
+      dz = 0.25,
+      hours = 24
+    )$PP_model[[1]]
+
+    pp_up <- compute_daily_PP_realcols(
+      date,
+      fitted_original_upper_PBmax,
+      fitted_original_upper_alpha,
+      fitted_original_upper_Eopt,
+      fitted_original_upper_Kd,
+      fitted_original_upper_chl_surface,
+      PAR,
+      bottomdepth = bottomdepth,
+      dz = 0.25,
+      hours = 24
+    )$PP_model[[1]]
+
+    tibble(
+      date = date,
+      PP_estimate = pp_est,
+      PP_lower = pp_low,
+      PP_upper = pp_up
+    )
+  }
+)
+
+ggplot(
+  pp_uncertainty,
+  aes(x = date, y = PP_estimate)
+) +
+  geom_ribbon(
+    aes(
+      ymin = PP_lower,
+      ymax = PP_upper
+    ),
+    fill = "steelblue",
+    alpha = 0.3
+  ) +
+  geom_line(
+    colour = "black"
+  ) +
+  theme_bw() +
+  labs(
+    title = "Daily PP with propagated parameter uncertainty",
+    x = NULL,
+    y = "Primary production"
+  )
+
+pp_uncertainty %>%
+  filter(
+    date >= as.Date("2024-03-01"),
+    date <= as.Date("2024-07-01")
+  ) %>%
+  ggplot(
+    aes(date, PP_estimate)
+  ) +
+  geom_ribbon(
+    aes(
+      ymin = PP_lower,
+      ymax = PP_upper
+    ),
+    fill = "red",
+    alpha = 0.4
+  ) +
+  geom_line(
+    linewidth = 0.5,
+    colour = "black"
+  ) +
+  theme_bw()
+```
+
+
 ## 6.5 Observed vs Predicted & Residuen (alle parameters)
 
 ```{r diagnostics, fig.width=12, fig.height=9}
@@ -389,6 +975,692 @@ plot_param_diagnostics_generic_realcols(fits[[example_cp]]$lm,  original_df = fi
 plot_param_diagnostics_generic_realcols(fits[[example_cp]]$gam, original_df = filter(pp_all, compartment==example_cp), title_suffix='GAM')
 plot_param_diagnostics_generic_realcols(fits[[example_cp]]$stm, original_df = filter(pp_all, compartment==example_cp), title_suffix='STM')
 ```
+
+```{r}
+# ============================================================
+# SHAPLEY CONTRIBUTIONS TO DAILY PP
+#
+# Four Shapley components:
+#   1. Long-term trend
+#   2. Seasonality
+#   3. Bloom 1
+#   4. Bloom 2
+#
+# Other time regressors are retained as the fixed background.
+#
+# Test:
+#   Compartment 1
+#   2020-01-01 onward
+#
+# Requires existing objects:
+#   all_stm_components
+#   PAR
+#   compute_daily_PP_realcols()
+# ============================================================
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+
+# ============================================================
+# 1. Settings
+# ============================================================
+
+components_to_decompose <- c(
+  "long_term_trend",
+  "seasonality",
+  "bloom1",
+  "bloom2"
+)
+
+parameters_needed <- c(
+  "PBmax",
+  "alpha",
+  "Eopt",
+  "Kd",
+  "chl_surface"
+)
+
+# compartment_selected <- "1"
+# start_date <- as.Date("2020-01-01")
+
+default_bottomdepth <- 10
+dz_value <- 0.25
+hours_value <- 24
+
+# ============================================================
+# 2. Calculate the contribution of other time regressors
+# ============================================================
+
+pp_component_data <- all_stm_components %>%
+  mutate(
+    other_regressors =
+      fitted_log -
+      long_term_trend -
+      seasonality -
+      bloom1 -
+      bloom2
+  # ) %>%
+  # filter(
+  #   compartment == compartment_selected,
+  #   date >= start_date
+  )
+
+# ============================================================
+# 3. Check reconstruction on the log-parameter scale
+# ============================================================
+
+reconstruction_check_parameters <- pp_component_data %>%
+  mutate(
+    reconstructed_log =
+      long_term_trend +
+      seasonality +
+      bloom1 +
+      bloom2 +
+      other_regressors,
+
+    difference =
+      fitted_log -
+      reconstructed_log
+  )
+
+summary(reconstruction_check_parameters$difference)
+
+# Expected: zero or extremely close to zero
+
+# ============================================================
+# 4. Convert parameter components to wide format
+# ============================================================
+
+pp_components_wide <- pp_component_data %>%
+  select(
+    date,
+    compartment,
+    parameter,
+    long_term_trend,
+    seasonality,
+    bloom1,
+    bloom2,
+    other_regressors
+  ) %>%
+  pivot_wider(
+    names_from = parameter,
+    values_from = c(
+      long_term_trend,
+      seasonality,
+      bloom1,
+      bloom2,
+      other_regressors
+    ),
+    names_glue = "{.value}_{parameter}"
+  ) %>%
+  arrange(date)
+
+# ============================================================
+# 5. Add PAR and bottom depth
+# ============================================================
+
+pp_components_wide <- pp_components_wide %>%
+  left_join(
+    PAR %>%
+      select(date, PAR) %>%
+      distinct(date, .keep_all = TRUE),
+    by = "date"
+  ) %>%
+  mutate(
+    bottomdepth = default_bottomdepth
+  )
+
+# Check missing PAR
+pp_components_wide %>%
+  summarise(
+    n_rows = n(),
+    missing_PAR = sum(is.na(PAR))
+  )
+
+# ============================================================
+# 6. Create parameter values for a coalition
+# ============================================================
+
+make_parameters_for_coalition <- function(
+    data,
+    active_components
+) {
+
+  out <- data
+
+  for (parameter_name in parameters_needed) {
+
+    # Other regressors are the fixed background
+    baseline_column <- paste0(
+      "other_regressors_",
+      parameter_name
+    )
+
+    log_value <- out[[baseline_column]]
+
+    # Add the active Shapley components
+    for (component_name in active_components) {
+
+      component_column <- paste0(
+        component_name,
+        "_",
+        parameter_name
+      )
+
+      log_value <- log_value + out[[component_column]]
+    }
+
+    # Back-transform parameter to original scale
+    out[[parameter_name]] <- exp(log_value)
+  }
+
+  out
+}
+
+# ============================================================
+# 7. Calculate daily PP for one coalition
+# ============================================================
+
+calculate_pp_for_coalition <- function(
+    data,
+    active_components,
+    coalition_key
+) {
+
+  parameter_data <- make_parameters_for_coalition(
+    data = data,
+    active_components = active_components
+  )
+
+  pp_values <- purrr::pmap_dbl(
+    parameter_data %>%
+      select(
+        date,
+        PBmax,
+        alpha,
+        Eopt,
+        Kd,
+        chl_surface,
+        PAR,
+        bottomdepth
+      ),
+
+    function(
+        date,
+        PBmax,
+        alpha,
+        Eopt,
+        Kd,
+        chl_surface,
+        PAR,
+        bottomdepth
+    ) {
+
+      input_values <- c(
+        PBmax,
+        alpha,
+        Eopt,
+        Kd,
+        chl_surface,
+        PAR,
+        bottomdepth
+      )
+
+      if (any(is.na(input_values))) {
+        return(NA_real_)
+      }
+
+      pp_result <- compute_daily_PP_realcols(
+        date,
+        PBmax,
+        alpha,
+        Eopt,
+        Kd,
+        chl_surface,
+        PAR,
+        bottomdepth = bottomdepth,
+        dz = dz_value,
+        hours = hours_value
+      )
+
+      pp_result$PP_model[[1]]
+    }
+  )
+
+  tibble(
+    date = parameter_data$date,
+    compartment = parameter_data$compartment,
+    coalition = coalition_key,
+    PP_model = pp_values
+  )
+}
+
+# ============================================================
+# 8. Helper for coalition names
+# ============================================================
+
+get_coalition_key <- function(components) {
+
+  if (length(components) == 0) {
+    return("none")
+  }
+
+  paste(
+    sort(components),
+    collapse = "+"
+  )
+}
+
+# ============================================================
+# 9. Generate all 16 coalitions
+# ============================================================
+
+coalition_table <- expand_grid(
+  long_term_trend = c(FALSE, TRUE),
+  seasonality = c(FALSE, TRUE),
+  bloom1 = c(FALSE, TRUE),
+  bloom2 = c(FALSE, TRUE)
+)
+
+coalition_table$active_components <- purrr::pmap(
+  coalition_table,
+  function(
+      long_term_trend,
+      seasonality,
+      bloom1,
+      bloom2
+  ) {
+
+    component_flags <- c(
+      long_term_trend = long_term_trend,
+      seasonality = seasonality,
+      bloom1 = bloom1,
+      bloom2 = bloom2
+    )
+
+    names(component_flags)[component_flags]
+  }
+)
+
+coalition_table <- coalition_table %>%
+  mutate(
+    coalition_key = map_chr(
+      active_components,
+      get_coalition_key
+    )
+  )
+
+coalition_table %>%
+  select(coalition_key)
+
+# ============================================================
+# 10. Calculate daily PP for all coalitions
+# ============================================================
+
+pp_by_coalition <- map2_dfr(
+  coalition_table$active_components,
+  coalition_table$coalition_key,
+
+  function(active_components, coalition_key) {
+
+    message(
+      "Calculating coalition: ",
+      coalition_key
+    )
+
+    calculate_pp_for_coalition(
+      data = pp_components_wide,
+      active_components = active_components,
+      coalition_key = coalition_key
+    )
+  }
+)
+
+# ============================================================
+# 11. Convert coalition PP to wide format
+# ============================================================
+
+pp_coalition_wide <- pp_by_coalition %>%
+  pivot_wider(
+    names_from = coalition,
+    values_from = PP_model,
+    names_prefix = "coalition__"
+  )
+
+# ============================================================
+# 12. Exact Shapley decomposition
+# ============================================================
+
+n_components <- length(components_to_decompose)
+
+shapley_results <- map_dfr(
+  components_to_decompose,
+
+  function(target_component) {
+
+    other_components <- setdiff(
+      components_to_decompose,
+      target_component
+    )
+
+    # Generate all subsets not containing target_component
+    subset_list <- unlist(
+      lapply(
+        0:length(other_components),
+
+        function(subset_size) {
+
+          if (subset_size == 0) {
+            return(list(character(0)))
+          }
+
+          combn(
+            other_components,
+            subset_size,
+            simplify = FALSE
+          )
+        }
+      ),
+      recursive = FALSE
+    )
+
+    weighted_differences <- map_dfc(
+      seq_along(subset_list),
+
+      function(i) {
+
+        subset_components <- subset_list[[i]]
+
+        subset_with_target <- c(
+          subset_components,
+          target_component
+        )
+
+        key_without <- get_coalition_key(
+          subset_components
+        )
+
+        key_with <- get_coalition_key(
+          subset_with_target
+        )
+
+        column_without <- paste0(
+          "coalition__",
+          key_without
+        )
+
+        column_with <- paste0(
+          "coalition__",
+          key_with
+        )
+
+        subset_size <- length(subset_components)
+
+        shapley_weight <-
+          factorial(subset_size) *
+          factorial(
+            n_components -
+              subset_size -
+              1
+          ) /
+          factorial(n_components)
+
+        pp_without <-
+          pp_coalition_wide[[column_without]]
+
+        pp_with <-
+          pp_coalition_wide[[column_with]]
+
+        tibble(
+          contribution =
+            shapley_weight *
+            (pp_with - pp_without)
+        )
+      }
+    )
+
+    tibble(
+      date = pp_coalition_wide$date,
+      compartment = pp_coalition_wide$compartment,
+      component = target_component,
+
+      PP_contribution = rowSums(
+        weighted_differences,
+        na.rm = FALSE
+      )
+    )
+  }
+)
+
+# ============================================================
+# 13. Add background and full PP
+# ============================================================
+
+background_column <- "coalition__none"
+
+full_coalition_key <- get_coalition_key(
+  components_to_decompose
+)
+
+full_column <- paste0(
+  "coalition__",
+  full_coalition_key
+)
+
+pp_background_and_full <- pp_coalition_wide %>%
+  transmute(
+    date,
+    compartment,
+
+    PP_background =
+      .data[[background_column]],
+
+    PP_full =
+      .data[[full_column]]
+  )
+
+daily_pp_shapley <- shapley_results %>%
+  left_join(
+    pp_background_and_full,
+    by = c(
+      "date",
+      "compartment"
+    )
+  )
+
+# ============================================================
+# 14. Check exact reconstruction
+# ============================================================
+
+pp_shapley_check <- daily_pp_shapley %>%
+  group_by(
+    date,
+    compartment
+  ) %>%
+  summarise(
+    PP_background = first(PP_background),
+    PP_full = first(PP_full),
+
+    shapley_sum = sum(
+      PP_contribution
+    ),
+
+    PP_reconstructed =
+      PP_background +
+      shapley_sum,
+
+    difference =
+      PP_full -
+      PP_reconstructed,
+
+    .groups = "drop"
+  )
+
+summary(pp_shapley_check$difference)
+
+# Expected: zero or extremely close to zero
+
+# ============================================================
+# 15. Give components readable names
+# ============================================================
+
+daily_pp_shapley <- daily_pp_shapley %>%
+  mutate(
+    component = factor(
+      component,
+
+      levels = c(
+        "long_term_trend",
+        "seasonality",
+        "bloom1",
+        "bloom2"
+      ),
+
+      labels = c(
+        "Long-term trend",
+        "Seasonality",
+        "Bloom 1",
+        "Bloom 2"
+      )
+    )
+  )
+
+# ============================================================
+# 16. Plot four Shapley contributions
+# ============================================================
+
+p_shapley <- ggplot(
+  daily_pp_shapley,
+  aes(
+    x = date,
+    y = PP_contribution
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "grey65"
+  ) +
+  geom_line(
+    colour = "steelblue4",
+    linewidth = 0.4
+  ) +
+  facet_wrap(
+    ~ component,
+    scales = "free_y",
+    ncol = 1
+  ) +
+  labs(
+    title = paste0(
+      "Shapley contributions to daily PP: compartment ",
+      compartment_selected
+    ),
+    subtitle =
+      "Other time regressors retained as the fixed background",
+    x = NULL,
+    y = "Shapley contribution to daily PP"
+  ) +
+  theme_bw()
+
+p_shapley
+
+# ============================================================
+# 17. Save test figure and results
+# ============================================================
+
+dir.create(
+  "pp_component_plots",
+  showWarnings = FALSE
+)
+
+ggsave(
+  filename = file.path(
+    "pp_component_plots",
+    paste0(
+      "daily_PP_shapley_compartment_",
+      compartment_selected,
+      "_2020_2024.png"
+    )
+  ),
+  plot = p_shapley,
+  width = 11,
+  height = 9,
+  dpi = 300
+)
+
+write_csv(
+  daily_pp_shapley,
+  file.path(
+    "pp_component_plots",
+    paste0(
+      "daily_PP_shapley_compartment_",
+      compartment_selected,
+      "_2020_2024.csv"
+    )
+  )
+)
+
+```
+```{r}
+dir.create(
+  "pp_component_plots",
+  showWarnings = FALSE
+)
+
+for(comp in unique(daily_pp_shapley$compartment)) {
+
+  p <- daily_pp_shapley %>%
+    filter(compartment == comp) %>%
+    ggplot(
+      aes(
+        x = date,
+        y = PP_contribution
+      )
+    ) +
+    geom_hline(
+      yintercept = 0,
+      colour = "grey65"
+    ) +
+    geom_line(
+      colour = "steelblue4",
+      linewidth = 0.4
+    ) +
+    facet_wrap(
+      ~ component,
+      scales = "free_y",
+      ncol = 1
+    ) +
+    theme_bw() +
+    labs(
+      title = paste0(
+        "Shapley contributions to daily PP: compartment ",
+        comp
+      ),
+      x = NULL,
+      y = "Shapley contribution to daily PP"
+    )
+
+  ggsave(
+    filename = file.path(
+      "pp_component_plots",
+      paste0(
+        "daily_PP_shapley_compartment_",
+        comp,
+        ".png"
+      )
+    ),
+    plot = p,
+    width = 11,
+    height = 9,
+    dpi = 300
+  )
+
+}
+```
+
+
+
 ```{r}
 params_pred <- fits[[example_cp]]$stm$params
 
@@ -419,6 +1691,7 @@ r2_table <- purrr::map_dfr(vars, function(v){
 
 r2_table
 ```
+
 ```{r}
 # ============================================================
 # PP fit for STM with new bloom times
@@ -443,8 +1716,8 @@ pp_fit_new_peaks <- map_dfr(names(preds), function(cp) {
       year,
       month
     ) %>%
-    summarise(
-      PP_observed = mean(PP_observed, na.rm = TRUE),
+    mutate(
+      PP_observed_monthly = mean(PP_observed, na.rm = TRUE),
       .groups = "drop"
     )
 
@@ -524,6 +1797,7 @@ pp_fit_new_peaks
 example_cp <- comps[3]
 compare_pp_models_with_obs(preds[[example_cp]], example_cp, obs)
 ```
+
 ## 6.7 Test STM model without blooms
 ```{r}
 ## Test: removing the bloom from the STM
@@ -807,12 +2081,12 @@ fits_validation <- purrr::map(
         df = d,
         model = "lm"
       ),
-
+    
       gam = fit_model_tidy_realcols(
         df = d,
         model = "gam"
       ),
-
+    
       stm = fit_model_tidy_realcols(
         df = d,
         model = "stm",
@@ -823,8 +2097,36 @@ fits_validation <- purrr::map(
           bloom2_center = p$stm_bloom2_center,
           bloom2_sigma = p$stm_bloom2_sigma
         )
+      ),
+    
+      stm_no_bloom2 = fit_model_tidy_realcols(
+        df = d,
+        model = "stm",
+        stm_cfg = list(
+          fourier_K = p$stm_fourier_K,
+          bloom1_center = p$stm_bloom1_center,
+          bloom1_sigma = p$stm_bloom1_sigma,
+          bloom2_center = p$stm_bloom2_center,
+          bloom2_sigma = p$stm_bloom2_sigma,
+    
+          include_bloom2 = FALSE
+        )
+      ), 
+      
+      stm_no_trend = fit_model_tidy_realcols_notrend(
+        df = d,
+        model = "stm",
+        stm_cfg = list(
+          fourier_K = p$stm_fourier_K,
+          bloom1_center = p$stm_bloom1_center,
+          bloom1_sigma = p$stm_bloom1_sigma,
+          bloom2_center = p$stm_bloom2_center,
+          bloom2_sigma = p$stm_bloom2_sigma,
+      
+          include_trend = FALSE
+        )
       )
-    )
+      )
   }
 )
 
@@ -837,9 +2139,11 @@ names(fits_validation) <- as.character(comps)
 
 preds_validation <- imap(fits_validation, function(fit_list, cp){
   list(
-    lm  = make_predictions_realcols(fit_list$lm,  irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_lm,  dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
-    gam = make_predictions_realcols(fit_list$gam, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_gam, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
-    stm = make_predictions_realcols(fit_list$stm, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_stm, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth)
+    #lm  = make_predictions_realcols(fit_list$lm,  irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_lm,  dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
+    #gam = make_predictions_realcols(fit_list$gam, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_gam, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth),
+    stm = make_predictions_realcols(fit_list$stm, irradiance_df = PAR, compartment = cp, out_dir = p$out_dir_stm, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth)#,
+    #stm_no_bloom2 = make_predictions_realcols(fit_list$stm_no_bloom2, irradiance_df = PAR, compartment = cp, out_dir = NULL, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth)
+    #stm_no_trend = make_predictions_realcols(fit_list$stm_no_trend, irradiance_df = PAR, compartment = cp, out_dir = NULL, dz = p$dz, hours = p$hours_per_day, default_bottomdepth = p$default_bottomdepth)
   )
 })
 ```
@@ -849,7 +2153,8 @@ preds_validation <- imap(fits_validation, function(fit_list, cp){
 # Plot validation-year PP and calculate model fit
 # ============================================================
 
-plot_pp_validation <- function(pred_df, obs_df, cp, model_name, validation_year){
+
+plot_pp_validation <- function(pred_df, obs_df, cp, model_name, validation_year) {
 
   pred_sel <- pred_df %>%
     mutate(date = as.Date(date)) %>%
@@ -872,7 +2177,7 @@ plot_pp_validation <- function(pred_df, obs_df, cp, model_name, validation_year)
       .groups = "drop"
     )
 
-  # Match predictions and observations only for metric calculation
+  # Match predictions and observations
   comparison <- inner_join(
     pred_sel,
     obs_sel,
@@ -899,7 +2204,8 @@ plot_pp_validation <- function(pred_df, obs_df, cp, model_name, validation_year)
     "\nn = ", metrics$n
   )
 
-  ggplot() +
+  # Time-series plot
+  p_time <- ggplot() +
     geom_line(
       data = pred_sel,
       aes(date, PP_model, colour = "Model"),
@@ -935,31 +2241,51 @@ plot_pp_validation <- function(pred_df, obs_df, cp, model_name, validation_year)
         validation_year
       ),
       x = NULL,
-      y = "Depth-integrated PP (mg C m^-2 d^-1)",
+      y = expression(
+        "Depth-integrated PP (mg C m"^{-2}~d^{-1}*")"
+      ),
       colour = NULL
     ) +
     theme_minimal()
+
+  # Observed-versus-predicted XY plot
+  p_xy <- ggplot(
+    comparison,
+    aes(x = PP_observed, y = PP_model)
+  ) +
+    geom_abline(
+      slope = 1,
+      intercept = 0,
+      linetype = "dashed",
+      colour = "grey40",
+      linewidth = 0.7
+    ) +
+    geom_point(
+      colour = "#1f77b4",
+      alpha = 0.7,
+      size = 2
+    ) +
+    #coord_equal() +
+    labs(
+      title = NULL,
+      x = expression(
+        "Observed PP (mg C m"^{-2}~d^{-1}*")"
+      ),
+      y = expression(
+        "Predicted PP (mg C m"^{-2}~d^{-1}*")"
+      )
+    ) +
+    theme_minimal()
+
+  # Return the plots side by side
+  p_time | p_xy
 }
+```
 
-# Select compartment
-example_cp <- as.character(comps[4])
 
-# Create validation plots
-pp_val_lm <- plot_pp_validation(
-  preds_validation[[example_cp]]$lm,
-  obs,
-  example_cp,
-  "LM",
-  validation_year
-)
-
-pp_val_gam <- plot_pp_validation(
-  preds_validation[[example_cp]]$gam,
-  obs,
-  example_cp,
-  "GAM",
-  validation_year
-)
+```{r}
+i <- 1
+example_cp <- comps[i]
 
 pp_val_stm <- plot_pp_validation(
   preds_validation[[example_cp]]$stm,
@@ -969,11 +2295,434 @@ pp_val_stm <- plot_pp_validation(
   validation_year
 )
 
-# Combine plots
-#pp_val_lm / pp_val_gam / 
 pp_val_stm
 ```
 
 
+```{r}
+## Check performance of STM model without the second bloom
+i <- 1
+example_cp <- comps[i]
+
+pp_val_stm_no_bloom2 <- plot_pp_validation(
+  preds_validation[[example_cp]]$stm_no_bloom2,
+  obs,
+  example_cp,
+  "STM no bloom 2",
+  validation_year
+)
+
+pp_val_stm_no_bloom2
+```
+
+
+
+```{r}
+## Check performance of STM model without the long-term trend
+i <- 1
+example_cp <- comps[i]
+
+pp_val_stm_no_trend <- plot_pp_validation(
+  preds_validation[[example_cp]]$stm_no_trend,
+  obs,
+  example_cp,
+  "STM no long-term trend",
+  validation_year
+)
+
+pp_val_stm_no_trend
+```
+```{r}
+i <- 6
+example_cp <- comps[i]
+
+#pp_ts_lm  <- plot_pp_timeseries(preds[[example_cp]]$lm,  obs, example_cp)
+#pp_ts_gam <- plot_pp_timeseries(preds[[example_cp]]$gam, obs, example_cp)
+pp_ts_stm_notrend <- plot_pp_timeseries(preds_validation[[example_cp]]$stm_no_trend, obs, example_cp)
+pp_ts_stm_notrend
+get_r2(preds_validation[[example_cp]]$stm_no_trend, obs, example_cp)
+#get_r2(preds[[example_cp]]$stm, obs, example_cp)
+
+```
+
+# 9. Testing use of Kd from both PP and Scheldemonitor long-term measurements
+
+```{r}
+
+# Create one merged observation dataset
+
+kd_obs <- full_join(
+  pp_compartment_Kd %>%
+    select(compartment, date, Kd_pp),
+
+  schelde_compartment_Kd %>%
+    select(compartment, date, Kd_schelde),
+
+  by = c("compartment", "date")
+) %>%
+  mutate(
+    Kd_obs = coalesce(Kd_pp, Kd_schelde)
+  ) %>%
+  select(compartment, date, Kd_obs)
+
+```
+
+
+```{r}
+# Replace STM Kd with observations when available
+
+fits_validation_kdobs <- fits_validation
+
+for(cp in names(fits_validation_kdobs)) {
+
+  fits_validation_kdobs[[cp]]$stm$params <-
+    fits_validation_kdobs[[cp]]$stm$params %>%
+    left_join(
+      kd_obs %>%
+        filter(compartment == as.numeric(cp)) %>%
+        select(date, Kd_obs),
+      by = "date"
+    ) %>%
+    mutate(
+      Kd = coalesce(Kd_obs, Kd)
+    ) %>%
+    select(-Kd_obs)
+
+}
+
+# Make predictions with the modified Kd
+
+preds_validation_kdobs <- imap(
+  fits_validation_kdobs,
+  function(fit_list, cp){
+
+    list(
+      stm = make_predictions_realcols(
+        fit_list$stm,
+        irradiance_df = PAR,
+        compartment = cp,
+        out_dir = NULL,
+        dz = p$dz,
+        hours = p$hours_per_day,
+        default_bottomdepth = p$default_bottomdepth
+      )
+    )
+  }
+)
+```
+
+```{r}
+get_r2(preds_validation[[example_cp]]$stm,
+       obs,
+       example_cp)
+
+get_r2(preds_validation_kdobs[[example_cp]]$stm,
+       obs,
+       example_cp)
+```
+```{r}
+plot_pp_all_years <- function(pred_df, obs_df, cp, model_name) {
+
+  pred_sel <- pred_df %>%
+    mutate(date = as.Date(date)) %>%
+    select(date, PP_model)
+
+  obs_sel <- obs_df %>%
+    mutate(
+      date = as.Date(date),
+      compartment = as.character(compartment)
+    ) %>%
+    filter(
+      compartment == as.character(cp),
+      !is.na(PP_observed)
+    ) %>%
+    group_by(date) %>%
+    summarise(
+      PP_observed = mean(PP_observed, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  comparison <- inner_join(
+    pred_sel,
+    obs_sel,
+    by = "date"
+  ) %>%
+    filter(
+      is.finite(PP_model),
+      is.finite(PP_observed)
+    )
+
+  metrics <- comparison %>%
+    summarise(
+      R2   = cor(PP_observed, PP_model)^2,
+      RMSE = sqrt(mean((PP_observed - PP_model)^2)),
+      MAE  = mean(abs(PP_observed - PP_model)),
+      n    = n()
+    )
+
+  metric_label <- paste0(
+    "R² = ", round(metrics$R2, 3),
+    "\nRMSE = ", round(metrics$RMSE, 1),
+    "\nMAE = ", round(metrics$MAE, 1),
+    "\nn = ", metrics$n
+  )
+
+  p_time <- ggplot() +
+    geom_line(
+      data = pred_sel,
+      aes(date, PP_model, colour = "Model"),
+      linewidth = 0.7
+    ) +
+    geom_point(
+      data = obs_sel,
+      aes(date, PP_observed, colour = "Observed"),
+      size = 1.8,
+      alpha = 0.7
+    ) +
+    annotate(
+      "label",
+      x = min(pred_sel$date),
+      y = Inf,
+      label = metric_label,
+      hjust = 0,
+      vjust = 1.1,
+      size = 3.5
+    ) +
+    scale_colour_manual(
+      values = c(
+        Model = "#1f77b4",
+        Observed = "#d62728"
+      )
+    ) +
+    labs(
+      title = paste(
+        model_name,
+        "| Compartment", cp,
+        "| All years"
+      ),
+      x = NULL,
+      y = expression(
+        "Depth-integrated PP (mg C m"^{-2}~d^{-1}*")"
+      ),
+      colour = NULL
+    ) +
+    theme_minimal()
+
+  p_xy <- ggplot(
+    comparison,
+    aes(
+      x = PP_observed,
+      y = PP_model
+    )
+  ) +
+    geom_abline(
+      slope = 1,
+      intercept = 0,
+      linetype = "dashed",
+      colour = "grey40"
+    ) +
+    geom_point(
+      colour = "#1f77b4",
+      alpha = 0.7,
+      size = 2
+    ) +
+    labs(
+      x = expression(
+        "Observed PP (mg C m"^{-2}~d^{-1}*")"
+      ),
+      y = expression(
+        "Predicted PP (mg C m"^{-2}~d^{-1}*")"
+      )
+    ) +
+    theme_minimal()
+
+  p_time | p_xy +
+    plot_layout(widths = c(1.3, 1))
+}
+```
+
+```{r}
+i <- 2
+example_cp <- comps[i]
+
+plot_pp_all_years(
+  preds_validation[[example_cp]]$stm,
+  obs,
+  example_cp,
+  "STM original"
+)
+
+plot_pp_all_years(
+  preds_validation_kdobs[[example_cp]]$stm,
+  obs,
+  example_cp,
+  "STM + observed Kd"
+)
+```
+```{r}
+# Statistics
+
+stats_compare <- map_dfr(
+  names(preds_validation),
+  function(cp){
+
+    bind_rows(
+
+      get_stats_validation(
+        preds_validation[[cp]]$stm,
+        obs,
+        cp,
+        validation_year
+      ) %>%
+        mutate(
+          compartment = cp,
+          model = "STM",
+          period = "Validation 2024"
+        ),
+
+      get_stats_validation(
+        preds_validation_kdobs[[cp]]$stm,
+        obs,
+        cp,
+        validation_year
+      ) %>%
+        mutate(
+          compartment = cp,
+          model = "STM + observed Kd",
+          period = "Validation 2024"
+        ),
+
+      get_stats_all_years(
+        preds_validation[[cp]]$stm,
+        obs,
+        cp
+      ) %>%
+        mutate(
+          compartment = cp,
+          model = "STM",
+          period = "All years"
+        ),
+
+      get_stats_all_years(
+        preds_validation_kdobs[[cp]]$stm,
+        obs,
+        cp
+      ) %>%
+        mutate(
+          compartment = cp,
+          model = "STM + observed Kd",
+          period = "All years"
+        )
+    )
+  }
+)
+
+stats_compare %>%
+  select(
+    compartment,
+    period,
+    model,
+    R2,
+    RMSE,
+    MAE,
+    n
+  ) %>%
+  arrange(compartment, period, model)
+
+stats_ppt <- stats_compare %>%
+  mutate(
+    R2 = round(R2, 3),
+    RMSE = round(RMSE, 1),
+    MAE = round(MAE, 1)
+  ) %>%
+  select(
+    compartment,
+    period,
+    model,
+    R2,
+    RMSE,
+    MAE
+  ) %>%
+  pivot_wider(
+    names_from = model,
+    values_from = c(R2, RMSE, MAE)
+  )
+
+View(stats_ppt)
+
+```
+
+## 10. Export STM predictions as yearly and seasonal (March-May) averages
+
+```{r}
+## Note: need to replace the NAs with the confidence interval/uncertainty envelope
+
+pp_stm_daily <- purrr::imap_dfr(
+  preds,
+
+  function(comp_data, comp_name) {
+
+    comp_data$stm %>%
+      mutate(
+        compartment = comp_name
+      )
+  }
+)
+
+pp_yearly <- pp_stm_daily %>%
+  mutate(
+    year = year(date)
+  ) %>%
+  group_by(
+    compartment,
+    year
+  ) %>%
+  summarise(
+    PP_mean = mean(
+      PP_model,
+      na.rm = TRUE
+    ),
+
+    PP_lower = NA_real_,
+    PP_upper = NA_real_,
+    uncertainty_percentage = NA_real_,
+
+    .groups = "drop"
+  )
+
+pp_spring <- pp_stm_daily %>%
+  filter(
+    month(date) %in% c(3, 4, 5)
+  ) %>%
+  mutate(
+    year = year(date)
+  ) %>%
+  group_by(
+    compartment,
+    year
+  ) %>%
+  summarise(
+    PP_mean = mean(
+      PP_model,
+      na.rm = TRUE
+    ),
+
+    PP_lower = NA_real_,
+    PP_upper = NA_real_,
+    uncertainty_percentage = NA_real_,
+
+    .groups = "drop"
+  )
+
+write_csv(
+  pp_yearly,
+  "PP_yearly_mean_by_compartment.csv"
+)
+
+write_csv(
+  pp_spring,
+  "PP_spring_mean_MarMay_by_compartment.csv"
+)
+```
 
 

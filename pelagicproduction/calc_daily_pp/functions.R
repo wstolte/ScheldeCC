@@ -230,48 +230,119 @@ fit_model_tidy_realcols <- function(df, model = c('lm','gam','stm'), stm_cfg = l
   }
   
   # ---------- STM (Prophet via recipe; uitkomst log → skip bij bake) ----------
-  if (model == 'stm'){
-    K  <- stm_cfg$fourier_K  %||% 5
-    c1 <- stm_cfg$bloom1_center %||% 75
-    s1 <- stm_cfg$bloom1_sigma  %||% 10
-    c2 <- stm_cfg$bloom2_center %||% 95
-    s2 <- stm_cfg$bloom2_sigma  %||% 15
+  if (model == "stm") {
     
-    build_wf <- function(y){
-      rec <- recipe(as.formula(paste(y, '~ date')), data = df) %>%
-        step_log(all_outcomes(), offset = 1e-8, skip = TRUE) %>%  # log-scale voor training, niet voor bake
-        step_timeseries_signature(date) %>%
-        step_rm(matches('(.iso$|.xts$|.wday.lbl$|.month.lbl$|.am.pm$)')) %>%
-        step_mutate(index_num = as.numeric(date)) %>%
-        step_fourier(date, K = K, period = 365.25) %>%
-        step_mutate(
-          bloom1 = exp(-0.5 * ((lubridate::yday(date) - c1)/s1)^2),
-          bloom2 = exp(-0.5 * ((lubridate::yday(date) - c2)/s2)^2)
+    K  <- stm_cfg$fourier_K %||% 5
+    c1 <- stm_cfg$bloom1_center %||% 75
+    s1 <- stm_cfg$bloom1_sigma %||% 10
+    c2 <- stm_cfg$bloom2_center %||% 95
+    s2 <- stm_cfg$bloom2_sigma %||% 15
+    
+    # Bloom switches
+    include_bloom1 <- stm_cfg$include_bloom1 %||% TRUE
+    include_bloom2 <- stm_cfg$include_bloom2 %||% TRUE
+    
+    build_wf <- function(y) {
+      
+      rec <- recipe(
+        as.formula(paste(y, "~ date")),
+        data = df
+      ) %>%
+        step_log(
+          all_outcomes(),
+          offset = 1e-8,
+          skip = TRUE
         ) %>%
+        step_timeseries_signature(date) %>%
+        step_rm(
+          matches("(.iso$|.xts$|.wday.lbl$|.month.lbl$|.am.pm$)")
+        ) %>%
+        step_mutate(
+          index_num = as.numeric(date)
+        ) %>%
+        step_fourier(
+          date,
+          K = K,
+          period = 365.25
+        )
+      
+      if (include_bloom1) {
+        
+        rec <- rec %>%
+          step_mutate(
+            bloom1 = exp(
+              -0.5 *
+                ((lubridate::yday(date) - c1) / s1)^2
+            )
+          )
+      }
+      
+      if (include_bloom2) {
+        
+        rec <- rec %>%
+          step_mutate(
+            bloom2 = exp(
+              -0.5 *
+                ((lubridate::yday(date) - c2) / s2)^2
+            )
+          )
+      }
+      
+      rec <- rec %>%
         step_zv(all_predictors())
       
       mod <- prophet_reg(
         seasonality_yearly = TRUE,
         seasonality_weekly = FALSE,
-        seasonality_daily  = FALSE
-      ) %>% set_engine('prophet')
+        seasonality_daily = FALSE
+      ) %>%
+        set_engine("prophet", uncertainty.samples = 1000)
       
-      workflow() %>% add_recipe(rec) %>% add_model(mod)
+      workflow() %>%
+        add_recipe(rec) %>%
+        add_model(mod)
     }
     
-    wfs  <- setNames(lapply(param_cols, build_wf), param_cols)
-    fits <- purrr::imap(wfs, ~ fit(.x, data = df))
+    wfs <- setNames(
+      lapply(param_cols, build_wf),
+      param_cols
+    )
     
-    preds_list <- purrr::imap(fits, function(wf_fit, nm){
-      tibble(date = pred_dates$date, !!nm := exp(predict(wf_fit, new_data = pred_dates)$.pred))
-    })
+    fits <- purrr::imap(
+      wfs,
+      ~ fit(.x, data = df)
+    )
     
-    params <- purrr::reduce(preds_list, left_join, by = 'date') %>%
+    preds_list <- purrr::imap(
+      fits,
+      function(wf_fit, nm) {
+        
+        tibble(
+          date = pred_dates$date,
+          !!nm := exp(
+            predict(
+              wf_fit,
+              new_data = pred_dates
+            )$.pred
+          )
+        )
+      }
+    )
+    
+    params <- purrr::reduce(
+      preds_list,
+      left_join,
+      by = "date"
+    ) %>%
       dplyr::arrange(date) %>%
-      dplyr::distinct(date, .keep_all = TRUE)
+      dplyr::distinct(
+        date,
+        .keep_all = TRUE
+      )
     
-    return(list(type='stm', workflows=fits, params=params, data=df, stm_cfg=stm_cfg))
+    return(list(type = "stm", workflows = fits, params = params, data = df, stm_cfg = stm_cfg))
   }
+  
 }
 
 ### Test removing blooms from STM model
@@ -399,6 +470,260 @@ fit_model_tidy_realcols_nobloom <- function(df, model = c('lm','gam','stm'), stm
     return(list(type='stm', workflows=fits, params=params, data=df, stm_cfg=stm_cfg))
   }
 }
+
+## Test removing long-term trend from STM
+fit_model_tidy_realcols_notrend <- function(df, model = c('lm','gam','stm'), stm_cfg = list()){
+  model <- match.arg(model)
+  
+  # sort → per dag reduceren
+  df <- df %>%
+    dplyr::arrange(date) %>%
+    collapse_daily_ts()
+  
+  req <- c('date','compartment','PBmax','alpha','Eopt','Kd','chl_surface')
+  stopifnot(all(req %in% names(df)))
+  param_cols <- c('PBmax','alpha','Eopt','Kd','chl_surface')
+  
+  # ---------- LM (lineaire interpolatie via recipe + zoo::na.approx) ----------
+  if (model == 'lm') {
+    
+    build_wf <- function(y){
+      rec <- recipe(as.formula(paste(y, "~ 1")), data = df) %>%
+        step_mutate(
+          !!rlang::ensym(y) := zoo::na.approx(!!rlang::ensym(y), na.rm = FALSE, rule = 2),
+          .pkgs = "zoo"
+        )
+      
+      mod <- null_model(mode = "regression") %>% set_engine("parsnip")
+      workflow() %>% add_recipe(rec) %>% add_model(mod)
+    }
+    
+    wfs  <- setNames(lapply(param_cols, build_wf), param_cols)
+    fits <- purrr::imap(wfs, ~ fit(.x, data = df))
+    
+    preds_list <- purrr::imap(fits, function(wf_fit, nm){
+      
+      observed <- df %>%
+        select(date, value = all_of(nm)) %>%
+        filter(!is.na(value))
+      
+      tibble(
+        date = pred_dates$date,
+        !!nm := zoo::na.approx(
+          object = observed$value,
+          x = as.numeric(observed$date),
+          xout = as.numeric(pred_dates$date),
+          na.rm = FALSE,
+          rule = 2
+        )
+      )
+    })
+    
+    params <- purrr::reduce(preds_list, left_join, by = "date") %>%
+      dplyr::arrange(date) %>%
+      dplyr::distinct(date, .keep_all = TRUE)
+    
+    return(list(type = "lm", workflows = fits, params = params, data = df))
+  }
+  
+  # ---------- GAM (één mgcv::gam per parameter) ----------
+  if (model == 'gam'){
+    
+    df_gam <- df %>%
+      dplyr::mutate(
+        date_num = as.numeric(date),
+        doy      = lubridate::yday(date)
+      )
+    
+    make_gam <- function(y) {
+      fml <- as.formula(
+        paste0('log(', y, ' + 1e-8) ~ s(date_num, bs="tp") + s(doy, bs="cc")')
+      )
+      mgcv::gam(fml, data = df_gam, method = "REML", na.action = na.exclude)
+    }
+    
+    gams <- purrr::map(param_cols, make_gam)
+    names(gams) <- param_cols
+    
+    pred_dates_gam <- pred_dates %>%
+      mutate(
+        date_num = as.numeric(date),
+        doy = lubridate::yday(date)
+      )
+    
+    preds_list <- purrr::imap(gams, function(gm, nm){
+      tibble::tibble(
+        date = pred_dates_gam$date,
+        !!nm := exp(
+          predict(
+            gm,
+            newdata = pred_dates_gam,
+            type = "response"
+          )
+        )
+      )
+    })
+    
+    params <- purrr::reduce(preds_list, dplyr::left_join, by = "date") %>%
+      dplyr::arrange(date) %>%
+      dplyr::distinct(date, .keep_all = TRUE)
+    
+    return(list(
+      type   = "gam",
+      gams   = gams,      # lijst met 5 mgcv::gam-objecten
+      params = params,
+      data   = df_gam     # bevat date_num en doy
+    ))
+  }
+  
+  # ---------- STM (Prophet via recipe; uitkomst log → skip bij bake) ----------
+  if (model == "stm") {
+    
+    K  <- stm_cfg$fourier_K %||% 5
+    c1 <- stm_cfg$bloom1_center %||% 75
+    s1 <- stm_cfg$bloom1_sigma %||% 10
+    c2 <- stm_cfg$bloom2_center %||% 95
+    s2 <- stm_cfg$bloom2_sigma %||% 15
+    
+    # Bloom switches
+    include_bloom1 <- stm_cfg$include_bloom1 %||% TRUE
+    include_bloom2 <- stm_cfg$include_bloom2 %||% TRUE
+    
+    # Long-term trend switch
+    include_trend <- stm_cfg$include_trend %||% TRUE
+    
+    build_wf <- function(y) {
+      
+      rec <- recipe(
+        as.formula(paste(y, "~ date")),
+        data = df
+      ) %>%
+        step_log(
+          all_outcomes(),
+          offset = 1e-8,
+          skip = TRUE
+        ) %>%
+        step_timeseries_signature(date) %>%
+        step_rm(
+          matches("(.iso$|.xts$|.wday.lbl$|.month.lbl$|.am.pm$)")
+        )
+      
+      if (include_trend) {
+        
+        rec <- rec %>%
+          step_mutate(
+            index_num = as.numeric(date)
+          )
+        
+      } else {
+        
+        rec <- rec %>%
+          step_rm(
+            date_index.num,
+            date_year,
+            date_half,
+            date_quarter,
+            date_month,
+            date_day,
+            date_wday,
+            date_mday,
+            date_qday,
+            date_yday,
+            date_mweek,
+            date_week,
+            date_week2,
+            date_week3,
+            date_week4,
+            date_mday7
+          )
+        
+      }
+      rec <- rec %>%
+        step_fourier(
+          date,
+          K = K,
+          period = 365.25
+        )
+      
+      if (include_bloom1) {
+        
+        rec <- rec %>%
+          step_mutate(
+            bloom1 = exp(
+              -0.5 *
+                ((lubridate::yday(date) - c1) / s1)^2
+            )
+          )
+      }
+      
+      if (include_bloom2) {
+        
+        rec <- rec %>%
+          step_mutate(
+            bloom2 = exp(
+              -0.5 *
+                ((lubridate::yday(date) - c2) / s2)^2
+            )
+          )
+      }
+      
+      rec <- rec %>%
+        step_zv(all_predictors())
+      
+      mod <- prophet_reg(
+        seasonality_yearly = TRUE,
+        seasonality_weekly = FALSE,
+        seasonality_daily = FALSE
+      ) %>%
+        set_engine("prophet")
+      
+      workflow() %>%
+        add_recipe(rec) %>%
+        add_model(mod)
+    }
+    
+    wfs <- setNames(
+      lapply(param_cols, build_wf),
+      param_cols
+    )
+    
+    fits <- purrr::imap(
+      wfs,
+      ~ fit(.x, data = df)
+    )
+    
+    preds_list <- purrr::imap(
+      fits,
+      function(wf_fit, nm) {
+        
+        tibble(
+          date = pred_dates$date,
+          !!nm := exp(
+            predict(
+              wf_fit,
+              new_data = pred_dates
+            )$.pred
+          )
+        )
+      }
+    )
+    
+    params <- purrr::reduce(
+      preds_list,
+      left_join,
+      by = "date"
+    ) %>%
+      dplyr::arrange(date) %>%
+      dplyr::distinct(
+        date,
+        .keep_all = TRUE
+      )
+    
+    return(list(type = "stm", workflows = fits, params = params, data = df, stm_cfg = stm_cfg))
+  }
+  
+}
+
 
 # ================================
 # 4) Voorspellen + export (EP integratie) — join één-op-één
@@ -842,5 +1167,91 @@ calc_pp_r2 <- function(
       ),
       n = nrow(pred_nobloom_monthly)
     )
+  )
+}
+
+get_stats_all_years <- function(pred_df, obs_df, cp) {
+  
+  obs_sel <- obs_df %>%
+    mutate(
+      compartment = as.character(compartment)
+    ) %>%
+    filter(
+      compartment == as.character(cp),
+      !is.na(PP_observed)
+    ) %>%
+    group_by(date) %>%
+    summarise(
+      PP_observed = mean(PP_observed, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  comparison <- inner_join(
+    obs_sel,
+    pred_df %>% select(date, PP_model),
+    by = "date"
+  )
+  
+  tibble(
+    R2   = cor(comparison$PP_observed,
+               comparison$PP_model)^2,
+    RMSE = sqrt(mean(
+      (comparison$PP_observed -
+         comparison$PP_model)^2
+    )),
+    MAE  = mean(abs(
+      comparison$PP_observed -
+        comparison$PP_model
+    )),
+    n = nrow(comparison)
+  )
+}
+
+get_stats_validation <- function(
+    pred_df,
+    obs_df,
+    cp,
+    validation_year
+) {
+  
+  obs_sel <- obs_df %>%
+    mutate(
+      compartment = as.character(compartment)
+    ) %>%
+    filter(
+      compartment == as.character(cp),
+      year(date) == validation_year,
+      !is.na(PP_observed)
+    ) %>%
+    group_by(date) %>%
+    summarise(
+      PP_observed = mean(PP_observed, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  pred_sel <- pred_df %>%
+    filter(
+      year(date) == validation_year
+    ) %>%
+    select(date, PP_model)
+  
+  comparison <- inner_join(
+    obs_sel,
+    pred_sel,
+    by = "date"
+  )
+  
+  tibble(
+    R2   = cor(comparison$PP_observed,
+               comparison$PP_model)^2,
+    RMSE = sqrt(mean(
+      (comparison$PP_observed -
+         comparison$PP_model)^2
+    )),
+    MAE  = mean(abs(
+      comparison$PP_observed -
+        comparison$PP_model
+    )),
+    n = nrow(comparison)
   )
 }

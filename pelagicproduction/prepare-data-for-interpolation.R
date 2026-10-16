@@ -1,5 +1,6 @@
 require(tidyverse)
 require(plotly)
+require(GGally)
 
 cfg <- list(
   file_knmi = "data/KNMI/meteo/dailymeteo.csv",
@@ -152,9 +153,35 @@ pp_wide %>%
   ggplot(aes(x = chl_surface)) +
   geom_histogram(aes(fill = as.factor(year(date))))
 
+# Do a chl value check based on quantiles? (instead of fixed threshold)
+quantile(pp_wide$chl_surface, c(0.95, 0.99, 0.995, 0.999))
+
 pp_wide <- pp_wide %>%
   # filter(year(date) < 2015) %>%
   filter(chl_surface <= 40)
+
+# Check ranges for other variables (negative or unrealistic values)
+summary(pp_wide$PBmax)
+summary(pp_wide$alpha)
+summary(pp_wide$Eopt)
+summary(pp_wide$Kd)
+
+# Check outliers for other variables
+pp_wide %>%
+  pivot_longer(c(PBmax, alpha, Eopt, Kd, chl_surface)) %>%
+  ggplot(aes(value)) +
+  geom_histogram() +
+  facet_wrap(~name, scales = "free")
+
+# Check correlation between all variables
+pp_wide %>%
+  +     select(PBmax, alpha, Eopt, Kd, chl_surface) %>%
+  +     ggpairs()
+
+# Create input directory if it doesn't exist
+if (!dir.exists(cfg$input_path)) {
+  dir.create(cfg$input_path, recursive = TRUE)
+}
 
 write_csv(pp_wide, file.path(cfg$input_path, "pp_wide.csv"))
 
